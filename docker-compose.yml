@@ -1,0 +1,23 @@
+name: hackrx-6.0
+
+services:
+    python:
+        build: ./
+        restart: unless-stopped
+        volumes:
+            - ./.env:/app/.env
+        depends_on:
+            redis:
+                condition: service_healthy
+    redis:
+        image: bitnami/redis:latest
+        restart: unless-stopped
+        ports:
+            - "6379:6379/tcp"
+        environment:
+            - ALLOW_EMPTY_PASSWORD=yes
+        healthcheck:
+            test: ["CMD", "redis-cli", "ping"]
+            interval: 30s
+            timeout: 10s
+            retries: 5

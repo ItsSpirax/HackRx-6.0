@@ -6,6 +6,4 @@ __pycache__/
 *.env
 .vscode/
 .DS_Store
-*.log
 data/
-document_data/

@@ -7,10 +7,6 @@ ENV/
 env.bak/
 venv.bak/
 
-# Other Files
-/document_data/
-requests.log
-
 # Django #
 *.log
 *.pot

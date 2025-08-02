@@ -9,12 +9,21 @@ COPY --from=builder /usr/local/lib/python3.12/site-packages/ /usr/local/lib/pyth
 COPY --from=builder /usr/local/bin/ /usr/local/bin/
 COPY . .
 RUN adduser --system --group hackrx
+
 ENV HOME=/home/hackrx \
     PATH=/home/hackrx/.local/bin:$PATH
 
 RUN mkdir -p /home/hackrx/.cache && \
     chown -R hackrx:hackrx /home/hackrx/.cache && \
     chmod -R 755 /home/hackrx/.cache
+
+RUN mkdir -p /app/document_data && \
+    chown -R hackrx:hackrx /app/document_data && \
+    chmod -R 755 /app/document_data
+    
+RUN touch /app/requests.log && \
+    chown hackrx:hackrx /app/requests.log && \
+    chmod 644 /app/requests.log
 
 USER hackrx
 EXPOSE 8000

@@ -8,8 +8,6 @@ services:
     restart: unless-stopped
     volumes:
       - ./.env:/app/.env
-      - ./document_data:/app/document_data
-      - ./requests.log:/app/requests.log
     depends_on:
       redis:
         condition: service_healthy

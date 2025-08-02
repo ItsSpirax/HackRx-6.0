@@ -1,6 +1,8 @@
 import email
 import io
 import re
+import hashlib
+from pathlib import Path
 from typing import List
 from urllib.parse import urlparse
 
@@ -38,6 +40,31 @@ def extract_text_from_pdf(content: bytes) -> str:
     )
 
 
+def extract_structured_docx(content: bytes) -> List[str]:
+    doc = docx.Document(io.BytesIO(content))
+    chunks = []
+    current_section = []
+
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if not text:
+            continue
+        if para.style.name.startswith("Heading"):
+            if current_section:
+                chunks.append("\n".join(current_section))
+                current_section = []
+            current_section.append(f"## {text}")
+        elif para.style.name.startswith("List"):
+            current_section.append(f"- {text}")
+        else:
+            current_section.append(text)
+
+    if current_section:
+        chunks.append("\n".join(current_section))
+
+    return chunks
+
+
 def extract_text_from_docx(content: bytes) -> str:
     doc = docx.Document(io.BytesIO(content))
     return " ".join(p.text for p in doc.paragraphs if p.text)
@@ -62,53 +89,60 @@ def token_length(text: str) -> int:
     return len(llama3_tokenizer.encode(text, add_special_tokens=False))
 
 
-def chunk_text(text: str, max_tokens: int, overlap_tokens: int) -> List[str]:
-    text = re.sub(r"\s+", " ", text).strip()
-    sentences = get_sentences(text)
-
-    chunks = []
-    current_chunk = []
-    current_tokens = 0
-
-    for sentence in sentences:
-        sentence_tokens = token_length(sentence)
-        if current_tokens + sentence_tokens <= max_tokens:
-            current_chunk.append(sentence)
-            current_tokens += sentence_tokens
+def smart_chunk_sections(
+    sections: List[str], max_tokens: int, overlap_tokens: int
+) -> List[str]:
+    final_chunks = []
+    for section in sections:
+        tokens = llama3_tokenizer.encode(section, add_special_tokens=False)
+        if len(tokens) <= max_tokens:
+            final_chunks.append(section)
         else:
-            if current_chunk:
-                chunks.append(" ".join(current_chunk))
-            overlap_chunk = []
-            overlap_count = 0
-            for s in reversed(current_chunk):
-                tok_len = token_length(s)
-                if overlap_count + tok_len <= overlap_tokens:
-                    overlap_chunk.insert(0, s)
-                    overlap_count += tok_len
+            sentences = get_sentences(section)
+            chunk = []
+            chunk_len = 0
+            for sent in sentences:
+                sent_tokens = token_length(sent)
+                if chunk_len + sent_tokens <= max_tokens:
+                    chunk.append(sent)
+                    chunk_len += sent_tokens
                 else:
-                    break
-            current_chunk = overlap_chunk + [sentence]
-            current_tokens = token_length(" ".join(current_chunk))
-
-    if current_chunk:
-        chunks.append(" ".join(current_chunk))
-
-    return chunks
+                    final_chunks.append(" ".join(chunk))
+                    chunk = [sent]
+                    chunk_len = sent_tokens
+            if chunk:
+                final_chunks.append(" ".join(chunk))
+    return final_chunks
 
 
 async def process_document(
     url: str, chunk_size: int = 512, chunk_overlap: int = 100
 ) -> List[str]:
     doc_type = identify_document_type(url)
-    content = download_document(url)
+
+    document_data_dir = Path("document_data")
+    document_data_dir.mkdir(exist_ok=True)
+
+    url_hash = hashlib.md5(url.encode()).hexdigest()
+    filename = f"{url_hash}.{doc_type}"
+    file_path = document_data_dir / filename
+
+    if file_path.exists():
+        with open(file_path, "rb") as f:
+            content = f.read()
+    else:
+        content = download_document(url)
+        with open(file_path, "wb") as f:
+            f.write(content)
 
     if doc_type == "pdf":
         text = extract_text_from_pdf(content)
+        return smart_chunk_sections([text], chunk_size, chunk_overlap)
     elif doc_type == "docx":
-        text = extract_text_from_docx(content)
+        structured_sections = extract_structured_docx(content)
+        return smart_chunk_sections(structured_sections, chunk_size, chunk_overlap)
     elif doc_type == "email":
         text = extract_text_from_email(content)
+        return smart_chunk_sections([text], chunk_size, chunk_overlap)
     else:
         raise ValueError(f"Unsupported document type: {doc_type}")
-
-    return chunk_text(text, chunk_size, chunk_overlap)

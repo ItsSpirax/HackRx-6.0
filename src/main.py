@@ -2,6 +2,8 @@ import asyncio
 import logging
 import os
 import traceback
+import json
+import time
 from typing import List
 from functools import partial
 
@@ -59,15 +61,17 @@ async def generate_embeddings_async(
     chunks: List[str], batch_size: int = EMBEDDING_BATCH_SIZE
 ) -> List[List[float]]:
     logger.info(f"Generating embeddings for {len(chunks)} chunks")
-
     cleaned_chunks = [c.strip() for c in chunks if c and c.strip()]
     if not cleaned_chunks:
         logger.warning("No valid content to embed after cleaning.")
-        return []
+        return [], 0
 
     all_embeddings = []
+    batch_count = 0
 
     async def process_batch(batch):
+        nonlocal batch_count
+        batch_count += 1
         try:
             func = partial(
                 client.embeddings.create,
@@ -91,7 +95,7 @@ async def generate_embeddings_async(
     for res in results:
         all_embeddings.extend(res)
 
-    return all_embeddings
+    return all_embeddings, batch_count
 
 
 async def generate_answer_async(question: str, matched_texts: List[str]) -> str:
@@ -104,7 +108,7 @@ Context:
 
 Question: {question}
 
-Your response should be direct and concise and detailed. Return only the factual answer without introductions, conclusions or additional comments.
+Your response should be direct, concise, and detailed. Return only the factual answer, and try to stay as verbatim to the original text as possible, without introductions, conclusions, or additional comments.
 """
     try:
 
@@ -129,8 +133,45 @@ Your response should be direct and concise and detailed. Return only the factual
         return "Failed to generate an answer due to an error."
 
 
+log_entry_counter = 0
+
+
+async def log_qa_to_file(request_body, answers=None, timing_data=None, metrics=None):
+    try:
+        global log_entry_counter
+        log_entry_counter += 1
+
+        log_data = {
+            "entry_id": log_entry_counter,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            "document_url": request_body.get("documents", ""),
+        }
+
+        if metrics:
+            log_data["metrics"] = metrics
+
+        if answers:
+            qa_pairs = []
+            for i, (q, a) in enumerate(zip(request_body.get("questions", []), answers)):
+                qa_pairs.append({"question_id": i + 1, "question": q, "answer": a})
+            log_data["qa_pairs"] = qa_pairs
+
+        if timing_data:
+            log_data["performance_metrics"] = timing_data
+
+        with open("requests.log", "a") as log_file:
+            log_file.write(json.dumps(log_data, indent=2) + ",\n\n")
+
+    except Exception as e:
+        logger.error(f"Error logging to file: {str(e)}")
+
+
 @app.post("/api/v1/hackrx/run")
 async def process_documents(request: Request):
+    start_time = time.time()
+    timing_data = {}
+    metrics = {}
+
     try:
         body = await request.json()
     except Exception:
@@ -147,6 +188,7 @@ async def process_documents(request: Request):
     questions = body["questions"]
 
     try:
+        doc_process_start = time.time()
         if document_url not in document_cache or body.get("force_reprocess", False):
             logger.info(f"Processing document: {document_url}")
             chunks = await process_document(document_url, 1000, 100)
@@ -154,30 +196,57 @@ async def process_documents(request: Request):
                 "chunks": chunks,
                 "timestamp": str(asyncio.get_event_loop().time()),
             }
+            timing_data["document_fetching_and_processing"] = round(
+                time.time() - doc_process_start, 3
+            )
         else:
             logger.info(f"Using cached document for {document_url}")
             chunks = document_cache[document_url]["chunks"]
+            timing_data["document_cache_retrieval"] = round(
+                time.time() - doc_process_start, 3
+            )
 
-        chunk_embed_task = asyncio.create_task(generate_embeddings_async(chunks))
-        question_embed_task = asyncio.create_task(generate_embeddings_async(questions))
-
-        chunk_embeddings, question_embeddings = await asyncio.gather(
-            chunk_embed_task, question_embed_task
+        metrics["document_chunks_count"] = len(chunks)
+        metrics["avg_chunk_length"] = (
+            round(sum(len(chunk) for chunk in chunks) / len(chunks), 1) if chunks else 0
         )
 
+        embedding_start = time.time()
+        combined_input = chunks + questions
+        all_embeddings, _ = await generate_embeddings_async(combined_input)
+        timing_data["embedding_generation"] = round(time.time() - embedding_start, 3)
+
+        chunk_embeddings = all_embeddings[: len(chunks)]
+        question_embeddings = all_embeddings[len(chunks) :]
+
+        redis_start = time.time()
         await store_embeddings_in_redis(chunks, chunk_embeddings)
+        timing_data["storing_embeddings_in_redis"] = round(time.time() - redis_start, 3)
 
         async def process_question_answer(question, q_embedding):
+            search_start = time.time()
             search_result = await search_similar_documents(q_embedding, k=7)
-            matched_texts = [doc["text"] for doc in search_result]
-            return await generate_answer_async(question, matched_texts)
+            search_time = round(time.time() - search_start, 3)
 
+            answer_start = time.time()
+            matched_texts = [doc["text"] for doc in search_result]
+            answer = await generate_answer_async(question, matched_texts)
+            answer_time = round(time.time() - answer_start, 3)
+
+            return answer
+
+        answer_process_start = time.time()
         answer_tasks = [
             process_question_answer(q, q_emb)
             for q, q_emb in zip(questions, question_embeddings)
         ]
-
         answers = await asyncio.gather(*answer_tasks)
+        timing_data["total_answer_processing"] = round(
+            time.time() - answer_process_start, 3
+        )
+        timing_data["total_request_time"] = round(time.time() - start_time, 3)
+
+        await log_qa_to_file(body, answers, timing_data, metrics)
 
         return {"answers": answers}
 

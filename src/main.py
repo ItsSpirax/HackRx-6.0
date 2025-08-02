@@ -1,20 +1,24 @@
+import asyncio
+import logging
+import os
+import traceback
+from typing import List
+
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
+from openai import OpenAI
+
+from src.document_processor import process_document
 from src.redis_client import (
     redis_client,
     check_redis_connection,
     store_embeddings_in_redis,
     search_similar_documents,
 )
-import logging
-from src.document_processor import process_document
-import traceback
-from dotenv import load_dotenv
-import os
-import asyncio
-from typing import List
-from openai import OpenAI
+
 
 load_dotenv()
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -81,9 +85,9 @@ async def generate_embeddings(
 
 async def generate_answer(question: str, matched_texts: List[str]) -> str:
     logger.info(f"Generating answer for question: {question}")
-    
+
     context = "\n\n".join(matched_texts)
-    
+
     prompt = f"""Use the following context to answer the question.
     
 Context:
@@ -93,7 +97,7 @@ Question: {question}
 
 Your response should be direct and concise and detailed. Return only the factual answer without introductions, conclusions or additional comments.
 """
-    
+
     try:
         answer_text = ""
         completion = client.chat.completions.create(
@@ -102,16 +106,16 @@ Your response should be direct and concise and detailed. Return only the factual
             temperature=0.2,
             top_p=0.7,
             max_tokens=1024,
-            stream=True
+            stream=True,
         )
-        
+
         for chunk in completion:
             if chunk.choices[0].delta.content is not None:
                 answer_text += chunk.choices[0].delta.content
-        
+
         logger.info(f"Successfully generated answer of length {len(answer_text)}")
         return answer_text
-    
+
     except Exception as e:
         logger.error(f"Error generating answer: {str(e)}")
         return "Failed to generate an answer due to an error."
@@ -144,16 +148,16 @@ async def process_documents(request: Request):
         search_tasks = []
         for q_embedding in questions_embeddings:
             search_tasks.append(search_similar_documents(q_embedding, k=15))
-        
+
         search_results = await asyncio.gather(*search_tasks)
-        
+
         answer_tasks = []
         for question, result in zip(questions, search_results):
             matched_texts = [doc["text"] for doc in result]
             answer_tasks.append(generate_answer(question, matched_texts))
-        
+
         answers = await asyncio.gather(*answer_tasks)
-        
+
         return {
             "answers": answers,
         }

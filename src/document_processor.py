@@ -1,11 +1,12 @@
-import requests
+import email
 import io
 import re
-from urllib.parse import urlparse
 from typing import List
-from PyPDF2 import PdfReader
+from urllib.parse import urlparse
+
 import docx
-import email
+import requests
+from PyPDF2 import PdfReader
 
 
 async def process_document(

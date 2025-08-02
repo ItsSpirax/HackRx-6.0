@@ -1,16 +1,19 @@
+import asyncio
+import json
+import os
+from typing import List
+
+import numpy as np
 import redis
 import redis.asyncio as redis_async
-from redisvl.index import AsyncSearchIndex
-from redis.commands.search.query import Query
-from redisvl.schema import IndexSchema
-import os
-import json
-import asyncio
-from typing import List
-import numpy as np
 from dotenv import load_dotenv
+from redis.commands.search.query import Query
+from redisvl.index import AsyncSearchIndex
+from redisvl.schema import IndexSchema
+
 
 load_dotenv()
+
 
 redis_host = os.getenv("REDIS_HOST")
 redis_port = int(os.getenv("REDIS_PORT"))
@@ -41,7 +44,6 @@ def check_redis_connection():
 
 
 def normalize_vector(vec: List[float]) -> bytes:
-    """Normalize and convert vector to float32 byte format."""
     arr = np.array(vec, dtype=np.float32)
     norm = np.linalg.norm(arr)
     if norm > 0:
@@ -113,7 +115,6 @@ async def store_embeddings_in_redis(chunks: List[str], embeddings: List[List[flo
     await async_client.close()
 
 
-
 async def search_similar_documents(query_embedding: List[float], k: int = 10):
     async_client = redis_async.Redis(
         host=redis_host, port=redis_port, db=redis_db, decode_responses=False
@@ -124,14 +125,18 @@ async def search_similar_documents(query_embedding: List[float], k: int = 10):
 
     base_query = f"*=>[KNN {k * 2} @embedding $vec_param]"
 
-    q = Query(base_query)\
-        .return_fields("text")\
-        .sort_by("__embedding_score")\
-        .paging(0, k * 2)\
+    q = (
+        Query(base_query)
+        .return_fields("text")
+        .sort_by("__embedding_score")
+        .paging(0, k * 2)
         .dialect(2)
+    )
 
     try:
-        res = await async_client.ft("document_index").search(q, query_params={"vec_param": query_vec})
+        res = await async_client.ft("document_index").search(
+            q, query_params={"vec_param": query_vec}
+        )
     except Exception as e:
         await async_client.close()
         raise Exception(f"Error during Redis search: {e}")

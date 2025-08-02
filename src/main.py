@@ -4,6 +4,7 @@ import os
 import traceback
 import json
 import time
+import requests
 from typing import List
 from functools import partial
 
@@ -30,6 +31,13 @@ logger = logging.getLogger("main")
 app = FastAPI()
 logger.info("Starting Longg Shott API service")
 
+invoke_url = "https://ai.api.nvidia.com/v1/retrieval/nvidia/llama-3_2-nemoretriever-500m-rerank-v2/reranking"
+
+headers = {
+    "Authorization": f"Bearer {os.getenv('NV_RANKING_API_KEY')}",
+    "Accept": "application/json",
+}
+
 
 @app.get("/")
 async def root():
@@ -45,7 +53,13 @@ async def status():
 
 
 client = OpenAI(
-    api_key=os.getenv("NVIDIA_API_KEY"), base_url="https://integrate.api.nvidia.com/v1"
+    api_key=os.getenv("NV_COMPLETION_API_KEY"),
+    base_url="https://integrate.api.nvidia.com/v1",
+)
+
+embeddingsClient = OpenAI(
+    api_key=os.getenv("NV_EMBEDDINGS_API_KEY"),
+    base_url="https://integrate.api.nvidia.com/v1",
 )
 
 document_cache = {}
@@ -74,7 +88,7 @@ async def generate_embeddings_async(
         batch_count += 1
         try:
             func = partial(
-                client.embeddings.create,
+                embeddingsClient.embeddings.create,
                 input=batch,
                 model="nvidia/llama-3.2-nemoretriever-300m-embed-v1",
                 encoding_format="float",
@@ -108,7 +122,7 @@ Context:
 
 Question: {question}
 
-Your response should be direct, concise, and detailed. Return only the factual answer, and try to stay as verbatim to the original text as possible, without introductions, conclusions, or additional comments.
+Provide a direct, concise, and detailed response, containing only factual information. The answer should be as verbatim to the original text as possible, with no introductions, conclusions, markdown, or additional comments. Ensure that all fine details and specific conditions are included, but do not provide a lengthy explanation for each point.
 """
     try:
 
@@ -224,14 +238,53 @@ async def process_documents(request: Request):
         timing_data["storing_embeddings_in_redis"] = round(time.time() - redis_start, 3)
 
         async def process_question_answer(question, q_embedding):
-            search_start = time.time()
-            search_result = await search_similar_documents(q_embedding, k=7)
-            search_time = round(time.time() - search_start, 3)
+            search_result = await search_similar_documents(q_embedding, k=15)
 
-            answer_start = time.time()
-            matched_texts = [doc["text"] for doc in search_result]
+            passages = [{"text": doc["text"]} for doc in search_result]
+
+            payload = {
+                "model": "nvidia/llama-3.2-nemoretriever-500m-rerank-v2",
+                "query": {"text": question},
+                "passages": passages,
+            }
+
+            def rerank_documents():
+                try:
+                    session = requests.Session()
+                    response = session.post(invoke_url, headers=headers, json=payload)
+                    response.raise_for_status()
+                    return response.json()
+                except Exception as e:
+                    logger.error(f"Error in reranking: {str(e)}")
+                    return {
+                        "rankings": [
+                            {"index": i, "logit": 0}
+                            for i in range(min(7, len(passages)))
+                        ]
+                    }
+
+            rerank_result = await run_in_executor(rerank_documents)
+
+            rankings = rerank_result.get("rankings", [])
+            sorted_rankings = sorted(
+                rankings, key=lambda x: x.get("logit", 0), reverse=True
+            )
+            top_indices = [item["index"] for item in sorted_rankings[:7]]
+            matched_texts = [
+                passages[idx]["text"] for idx in top_indices if idx < len(passages)
+            ]
+
+            if len(matched_texts) < 7:
+                remaining = 7 - len(matched_texts)
+                original_texts = [p["text"] for p in passages]
+                for text in original_texts:
+                    if text not in matched_texts and remaining > 0:
+                        matched_texts.append(text)
+                        remaining -= 1
+                    if remaining == 0:
+                        break
+
             answer = await generate_answer_async(question, matched_texts)
-            answer_time = round(time.time() - answer_start, 3)
 
             return answer
 

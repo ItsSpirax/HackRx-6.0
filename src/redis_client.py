@@ -123,13 +123,13 @@ async def search_similar_documents(query_embedding: List[float], k: int = 10):
 
     query_vec = normalize_vector(query_embedding)
 
-    base_query = f"*=>[KNN {k * 2} @embedding $vec_param]"
+    base_query = f"*=>[KNN {k} @embedding $vec_param]"
 
     q = (
         Query(base_query)
         .return_fields("text")
         .sort_by("__embedding_score")
-        .paging(0, k * 2)
+        .paging(0, k)
         .dialect(2)
     )
 

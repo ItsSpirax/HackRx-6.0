@@ -7,24 +7,9 @@ from urllib.parse import urlparse
 import docx
 import requests
 from PyPDF2 import PdfReader
+from transformers import AutoTokenizer
 
-
-async def process_document(
-    url: str, chunk_size: int = 1000, chunk_overlap: int = 200
-) -> List[str]:
-    doc_type = identify_document_type(url)
-    content = download_document(url)
-
-    if doc_type == "pdf":
-        text = extract_text_from_pdf(content)
-    elif doc_type == "docx":
-        text = extract_text_from_docx(content)
-    elif doc_type == "email":
-        text = extract_text_from_email(content)
-    else:
-        raise ValueError(f"Unsupported document type: {doc_type}")
-
-    return chunk_text(text, chunk_size, chunk_overlap)
+llama3_tokenizer = AutoTokenizer.from_pretrained("NousResearch/Meta-Llama-3-8B")
 
 
 def identify_document_type(url: str) -> str:
@@ -49,15 +34,13 @@ def download_document(url: str) -> bytes:
 
 def extract_text_from_pdf(content: bytes) -> str:
     return " ".join(
-        page.extract_text()
-        for page in PdfReader(io.BytesIO(content)).pages
-        if page.extract_text()
+        page.extract_text() or "" for page in PdfReader(io.BytesIO(content)).pages
     )
 
 
 def extract_text_from_docx(content: bytes) -> str:
     doc = docx.Document(io.BytesIO(content))
-    return " ".join(paragraph.text for paragraph in doc.paragraphs if paragraph.text)
+    return " ".join(p.text for p in doc.paragraphs if p.text)
 
 
 def extract_text_from_email(content: bytes) -> str:
@@ -71,55 +54,61 @@ def extract_text_from_email(content: bytes) -> str:
     return msg.get_payload(decode=True).decode("utf-8", "ignore")
 
 
-def chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
+def get_sentences(text: str) -> List[str]:
+    return re.split(r"(?<=[.!?])\s+", text)
+
+
+def token_length(text: str) -> int:
+    return len(llama3_tokenizer.encode(text, add_special_tokens=False))
+
+
+def chunk_text(text: str, max_tokens: int, overlap_tokens: int) -> List[str]:
     text = re.sub(r"\s+", " ", text).strip()
-    paragraphs = [
-        p.strip() for p in re.split(r"\n\s*\n|\r\n\s*\r\n", text) if p.strip()
-    ]
+    sentences = get_sentences(text)
+
     chunks = []
+    current_chunk = []
+    current_tokens = 0
 
-    def get_sentences(t):
-        return [
-            s.strip()
-            for s in re.split(r"(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\?|\!)\s", t)
-            if s.strip()
-        ]
-
-    current = ""
-    for p in paragraphs:
-        if len(current) + len(p) > chunk_size and current:
-            chunks.append(current.strip())
-            overlap = ""
-            for s in reversed(get_sentences(current)):
-                if len(overlap) + len(s) <= chunk_overlap:
-                    overlap = s + " " + overlap
+    for sentence in sentences:
+        sentence_tokens = token_length(sentence)
+        if current_tokens + sentence_tokens <= max_tokens:
+            current_chunk.append(sentence)
+            current_tokens += sentence_tokens
+        else:
+            if current_chunk:
+                chunks.append(" ".join(current_chunk))
+            overlap_chunk = []
+            overlap_count = 0
+            for s in reversed(current_chunk):
+                tok_len = token_length(s)
+                if overlap_count + tok_len <= overlap_tokens:
+                    overlap_chunk.insert(0, s)
+                    overlap_count += tok_len
                 else:
                     break
-            current = overlap + p
-        else:
-            current += (" " if current else "") + p
+            current_chunk = overlap_chunk + [sentence]
+            current_tokens = token_length(" ".join(current_chunk))
 
-    if current:
-        chunks.append(current.strip())
+    if current_chunk:
+        chunks.append(" ".join(current_chunk))
 
-    result = []
-    for chunk in chunks:
-        if len(chunk) <= chunk_size:
-            result.append(chunk)
-        else:
-            current = ""
-            for s in get_sentences(chunk):
-                if len(current) + len(s) <= chunk_size:
-                    current += (" " if current else "") + s
-                else:
-                    result.append(current)
-                    overlap = ""
-                    for os in reversed(get_sentences(current)):
-                        if len(overlap) + len(os) <= chunk_overlap:
-                            overlap = os + " " + overlap
-                        else:
-                            break
-                    current = overlap + s
-            if current:
-                result.append(current)
-    return result
+    return chunks
+
+
+async def process_document(
+    url: str, chunk_size: int = 512, chunk_overlap: int = 100
+) -> List[str]:
+    doc_type = identify_document_type(url)
+    content = download_document(url)
+
+    if doc_type == "pdf":
+        text = extract_text_from_pdf(content)
+    elif doc_type == "docx":
+        text = extract_text_from_docx(content)
+    elif doc_type == "email":
+        text = extract_text_from_email(content)
+    else:
+        raise ValueError(f"Unsupported document type: {doc_type}")
+
+    return chunk_text(text, chunk_size, chunk_overlap)

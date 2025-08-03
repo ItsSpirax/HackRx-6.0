@@ -35,8 +35,6 @@ logger.info("Starting Longg Shott API service")
 
 invoke_url = "https://ai.api.nvidia.com/v1/retrieval/nvidia/llama-3_2-nemoretriever-500m-rerank-v2/reranking"
 
-genai.configure(api_key=os.getenv("GEMINI_COMPLETION_API_KEY"))
-
 embeddingsClient = OpenAI(
     api_key=os.getenv("NV_EMBEDDINGS_API_KEY"),
     base_url="https://integrate.api.nvidia.com/v1",
@@ -44,7 +42,8 @@ embeddingsClient = OpenAI(
 
 document_cache = {}
 EMBEDDING_BATCH_SIZE = 50
-LAST_USED_API_KEY = 0
+LAST_USED_API_KEY_NV = 0
+LAST_USED_API_KEY_GEMINI = 0
 
 
 async def run_in_executor(func):
@@ -117,6 +116,15 @@ Rules:
     try:
 
         def get_completion():
+            global LAST_USED_API_KEY_GEMINI
+            if LAST_USED_API_KEY_GEMINI == 0:
+                api_key = os.getenv("GEMINI_COMPLETION_API_KEY_0")
+            else:
+                api_key = os.getenv("GEMINI_COMPLETION_API_KEY_1")
+
+            LAST_USED_API_KEY_GEMINI = 1 - LAST_USED_API_KEY_GEMINI
+            
+            genai.configure(api_key=api_key)
             model = genai.GenerativeModel(
                 "gemini-2.0-flash-lite",
                 system_instruction="You are a professional research assistant that only provides answers based on the documents provided. Never invent information.",
@@ -241,18 +249,18 @@ async def process_documents(request: Request):
 
             def rerank_documents():
                 try:
-                    global LAST_USED_API_KEY
+                    global LAST_USED_API_KEY_NV
                     session = requests.Session()
                     api_key = (
                         os.getenv("NV_RANKING_API_KEY_0")
-                        if LAST_USED_API_KEY == 0
+                        if LAST_USED_API_KEY_NV == 0
                         else os.getenv("NV_RANKING_API_KEY_1")
                     )
                     headers = {
                         "Authorization": f"Bearer {api_key}",
                         "Accept": "application/json",
                     }
-                    LAST_USED_API_KEY = 1 - LAST_USED_API_KEY
+                    LAST_USED_API_KEY_NV = 1 - LAST_USED_API_KEY_NV
                     response = session.post(invoke_url, headers=headers, json=payload)
                     response.raise_for_status()
                     return response.json()

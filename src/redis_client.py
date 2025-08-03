@@ -34,15 +34,6 @@ def get_redis_client():
 redis_client = get_redis_client()
 
 
-def check_redis_connection():
-    if redis_client:
-        try:
-            return redis_client.ping()
-        except:
-            pass
-    return False
-
-
 def normalize_vector(vec: List[float]) -> bytes:
     arr = np.array(vec, dtype=np.float32)
     norm = np.linalg.norm(arr)

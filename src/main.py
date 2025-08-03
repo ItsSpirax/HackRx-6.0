@@ -4,18 +4,20 @@ import os
 import traceback
 import json
 import time
+import re
 import requests
 from typing import List
 from functools import partial
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
+import google.generativeai as genai
+from google.generativeai import types
 from openai import OpenAI
 
 from src.document_processor import process_document
 from src.redis_client import (
     redis_client,
-    check_redis_connection,
     store_embeddings_in_redis,
     search_similar_documents,
 )
@@ -33,29 +35,7 @@ logger.info("Starting Longg Shott API service")
 
 invoke_url = "https://ai.api.nvidia.com/v1/retrieval/nvidia/llama-3_2-nemoretriever-500m-rerank-v2/reranking"
 
-headers = {
-    "Authorization": f"Bearer {os.getenv('NV_RANKING_API_KEY')}",
-    "Accept": "application/json",
-}
-
-
-@app.get("/")
-async def root():
-    return {"status": "API is running", "code": 200}
-
-
-@app.get("/api/v1/redis_status")
-async def status():
-    if check_redis_connection():
-        return {"redis_status": "connected"}
-    logger.warning("Status check: Redis connection failed")
-    return {"redis_status": "disconnected"}
-
-
-client = OpenAI(
-    api_key=os.getenv("NV_COMPLETION_API_KEY"),
-    base_url="https://integrate.api.nvidia.com/v1",
-)
+genai.configure(api_key=os.getenv("GEMINI_COMPLETION_API_KEY"))
 
 embeddingsClient = OpenAI(
     api_key=os.getenv("NV_EMBEDDINGS_API_KEY"),
@@ -64,6 +44,7 @@ embeddingsClient = OpenAI(
 
 document_cache = {}
 EMBEDDING_BATCH_SIZE = 50
+LAST_USED_API_KEY = 0
 
 
 async def run_in_executor(func):
@@ -114,32 +95,42 @@ async def generate_embeddings_async(
 
 async def generate_answer_async(question: str, matched_texts: List[str]) -> str:
     logger.info(f"Generating answer for question: {question}")
-    context = "\n\n".join(matched_texts)
-    prompt = f"""Use the following context to answer the question.
+    context = "\n\n".join(
+        [f"Context {i+1}: {text}" for i, text in enumerate(matched_texts)]
+    )
+    prompt = f"""
+You are a helpful assistant who provides direct and concise answers based on the provided context.
 
 Context:
 {context}
 
 Question: {question}
 
-Provide a direct, concise, and detailed response, containing only factual information. The answer should be as verbatim to the original text as possible, with no introductions, conclusions, markdown, or additional comments. Ensure that all fine details and specific conditions are included, but do not provide a lengthy explanation for each point.
+Rules:
+- Answer the question based *only* on the information in the provided context.
+- Your response must be direct, concise, and factual.
+- For every piece of information you provide, append a citation `[CITE:<source_number>]` where `<source_number>` corresponds to the context number (e.g., [CITE:1], [CITE:2]).
+- If the answer is not found in the context, or if the context provides contradictory or insufficient information, respond with "I am unable to answer this question based on the provided documents."
+- Do not use any introductory phrases, conclusions, or markdown.
+- Keep the response as short as possible while including all relevant details.
 """
     try:
 
         def get_completion():
-            answer = ""
-            completion = client.chat.completions.create(
-                model="nvidia/llama3-chatqa-1.5-70b",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
-                top_p=0.7,
-                max_tokens=1024,
-                stream=True,
+            model = genai.GenerativeModel(
+                "gemini-2.0-flash-lite",
+                system_instruction="You are a professional research assistant that only provides answers based on the documents provided. Never invent information.",
             )
-            for chunk in completion:
-                if chunk.choices[0].delta.content:
-                    answer += chunk.choices[0].delta.content
-            return answer
+            response = model.generate_content(
+                prompt,
+                generation_config=genai.types.GenerationConfig(
+                    max_output_tokens=512,
+                    temperature=0.0,
+                    top_p=1.0,
+                    top_k=5,
+                ),
+            )
+            return response.text if hasattr(response, "text") else str(response)
 
         return await run_in_executor(get_completion)
     except Exception as e:
@@ -238,7 +229,7 @@ async def process_documents(request: Request):
         timing_data["storing_embeddings_in_redis"] = round(time.time() - redis_start, 3)
 
         async def process_question_answer(question, q_embedding):
-            search_result = await search_similar_documents(q_embedding, k=15)
+            search_result = await search_similar_documents(q_embedding, k=20)
 
             passages = [{"text": doc["text"]} for doc in search_result]
 
@@ -250,7 +241,18 @@ async def process_documents(request: Request):
 
             def rerank_documents():
                 try:
+                    global LAST_USED_API_KEY
                     session = requests.Session()
+                    api_key = (
+                        os.getenv("NV_RANKING_API_KEY_0")
+                        if LAST_USED_API_KEY == 0
+                        else os.getenv("NV_RANKING_API_KEY_1")
+                    )
+                    headers = {
+                        "Authorization": f"Bearer {api_key}",
+                        "Accept": "application/json",
+                    }
+                    LAST_USED_API_KEY = 1 - LAST_USED_API_KEY
                     response = session.post(invoke_url, headers=headers, json=payload)
                     response.raise_for_status()
                     return response.json()
@@ -259,7 +261,7 @@ async def process_documents(request: Request):
                     return {
                         "rankings": [
                             {"index": i, "logit": 0}
-                            for i in range(min(7, len(passages)))
+                            for i in range(min(10, len(passages)))
                         ]
                     }
 
@@ -269,13 +271,13 @@ async def process_documents(request: Request):
             sorted_rankings = sorted(
                 rankings, key=lambda x: x.get("logit", 0), reverse=True
             )
-            top_indices = [item["index"] for item in sorted_rankings[:7]]
+            top_indices = [item["index"] for item in sorted_rankings[:10]]
             matched_texts = [
                 passages[idx]["text"] for idx in top_indices if idx < len(passages)
             ]
 
-            if len(matched_texts) < 7:
-                remaining = 7 - len(matched_texts)
+            if len(matched_texts) < 10:
+                remaining = 10 - len(matched_texts)
                 original_texts = [p["text"] for p in passages]
                 for text in original_texts:
                     if text not in matched_texts and remaining > 0:
@@ -285,8 +287,9 @@ async def process_documents(request: Request):
                         break
 
             answer = await generate_answer_async(question, matched_texts)
-
-            return answer
+            answer = answer.replace("\n", " ").strip()
+            cleaned_answer = re.sub(r" \[CITE:.*?\]", "", answer)
+            return cleaned_answer
 
         answer_process_start = time.time()
         answer_tasks = [

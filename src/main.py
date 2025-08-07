@@ -115,7 +115,7 @@ def sanitize_context(matched_texts: List[str]) -> List[str]:
     sanitized_texts = []
     for text in matched_texts:
         sanitized_text = text
-        for keyword in forbidden_keywords:
+        for keyword in forbidden_injection_keywords:
             sanitized_text = re.sub(
                 keyword, "[REDACTED]", sanitized_text, flags=re.IGNORECASE
             )

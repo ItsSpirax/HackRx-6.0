@@ -115,19 +115,7 @@ Rules:
     try:
 
         def get_completion():
-            global LAST_USED_API_KEY_GEMINI
-            if LAST_USED_API_KEY_GEMINI == 0:
-                api_key = os.getenv("GEMINI_COMPLETION_API_KEY_0")
-            elif LAST_USED_API_KEY_GEMINI == 1:
-                api_key = os.getenv("GEMINI_COMPLETION_API_KEY_1")
-            elif LAST_USED_API_KEY_GEMINI == 2:
-                api_key = os.getenv("GEMINI_COMPLETION_API_KEY_2")
-            else:
-                api_key = os.getenv("GEMINI_COMPLETION_API_KEY_3")
-
-            LAST_USED_API_KEY_GEMINI = (LAST_USED_API_KEY_GEMINI + 1) % 4
-
-            genai.configure(api_key=api_key)
+            genai.configure(api_key=os.getenv("GEMINI_COMPLETION_API_KEY"))
             model = genai.GenerativeModel(
                 os.getenv("COMPLETION_MODEL"),
                 system_instruction="You are a professional research assistant that only provides answers based on the documents provided. Never invent information.",

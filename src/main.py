@@ -157,7 +157,7 @@ Use citation format [CITE:<source_number>] after every factual statement.
 Rules:
 - Answer only using the provided context.
 - Be direct, concise, and factual.
-- If the answer is missing, contradictory, or unclear in context, reply: "I am unable to answer this question based on the provided documents."
+- If the answer is missing, contradictory, or unclear in context, reply: "I'm sorry, I can only provide answers based on the specific policy documents you've provided. The information requested isn't available in those documents or falls outside of my designated scope."
 - Do not include any introductions, summaries, or markdown.
 """
     try:

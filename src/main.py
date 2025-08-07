@@ -120,10 +120,12 @@ Rules:
                 api_key = os.getenv("GEMINI_COMPLETION_API_KEY_0")
             elif LAST_USED_API_KEY_GEMINI == 1:
                 api_key = os.getenv("GEMINI_COMPLETION_API_KEY_1")
-            else:
+            elif LAST_USED_API_KEY_GEMINI == 2:
                 api_key = os.getenv("GEMINI_COMPLETION_API_KEY_2")
+            else:
+                api_key = os.getenv("GEMINI_COMPLETION_API_KEY_3")
 
-            LAST_USED_API_KEY_GEMINI = (LAST_USED_API_KEY_GEMINI + 1) % 3
+            LAST_USED_API_KEY_GEMINI = (LAST_USED_API_KEY_GEMINI + 1) % 4
 
             genai.configure(api_key=api_key)
             model = genai.GenerativeModel(

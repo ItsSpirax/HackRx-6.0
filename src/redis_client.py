@@ -45,6 +45,11 @@ def generate_embedding_cache_key(doc_hash: str, embedding: List[float]) -> str:
     return f"simsearch:{doc_hash}:{key_hash}"
 
 
+def escape_redis_query(text: str) -> str:
+    specials = r'{}[]()|&!@^~":;,.<>?*$%\'\\/+-'
+    return "".join(f"\\{c}" if c in specials else c for c in text)
+
+
 async def store_embeddings_in_redis(
     doc_hash: str, chunks: List[str], embeddings: List[List[float]]
 ):
@@ -112,7 +117,7 @@ async def store_embeddings_in_redis(
 
 
 async def search_similar_documents(
-    query_embedding: List[float], doc_hash: str, k: int = 10
+    query_embedding: List[float], query_text: str, doc_hash: str, k: int = 10
 ):
     async_client = redis_async.Redis(
         host=redis_host, port=redis_port, db=redis_db, decode_responses=True
@@ -126,35 +131,45 @@ async def search_similar_documents(
 
     query_vec = normalize_vector(query_embedding)
 
-    base_query = f"@doc_hash:{{{doc_hash}}}=>[KNN {k} @embedding $vec_param]"
-
-    q = (
-        Query(base_query)
-        .return_fields("text")
-        .sort_by("__embedding_score")
-        .paging(0, k)
-        .dialect(2)
-    )
+    vector_matches = []
+    bm25_matches = []
 
     try:
-        res = await async_client.ft("document_index").search(
-            q, query_params={"vec_param": query_vec}
+        base_query = f"@doc_hash:{{{doc_hash}}}=>[KNN {k*2} @embedding $vec_param]"
+        vector_query = (
+            Query(base_query)
+            .return_fields("text")
+            .sort_by("__embedding_score")
+            .paging(0, k * 2)
+            .dialect(2)
         )
+        vector_res = await async_client.ft("document_index").search(
+            vector_query, query_params={"vec_param": query_vec}
+        )
+        vector_matches = [{"text": doc.text} for doc in vector_res.docs]
     except Exception as e:
-        await async_client.close()
-        raise Exception(f"Error during Redis search: {e}")
+        print(f"Vector search error: {e}")
+
+    try:
+        bm25_query_str = f'@doc_hash:{{{doc_hash}}} "{escape_redis_query(query_text)}"'
+        bm25_query = (
+            Query(bm25_query_str).return_fields("text").paging(0, k * 2).dialect(2)
+        )
+        bm25_res = await async_client.ft("document_index").search(bm25_query)
+        bm25_matches = [{"text": doc.text} for doc in bm25_res.docs]
+    except Exception as e:
+        print(f"BM25 search error: {e}")
 
     seen = set()
-    unique_matches = []
-    for doc in res.docs:
-        text = doc.text
-        if text not in seen:
-            seen.add(text)
-            unique_matches.append({"text": text})
-        if len(unique_matches) == k:
+    merged_results = []
+    for match in vector_matches + bm25_matches:
+        if match["text"] not in seen:
+            seen.add(match["text"])
+            merged_results.append({"text": match["text"]})
+        if len(merged_results) == k:
             break
 
-    await async_client.set(cache_key, json.dumps(unique_matches), ex=3600)
-
+    await async_client.set(cache_key, json.dumps(merged_results), ex=3600)
     await async_client.close()
-    return unique_matches
+
+    return merged_results

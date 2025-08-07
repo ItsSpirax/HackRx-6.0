@@ -8,6 +8,8 @@ WORKDIR /app
 COPY --from=builder /usr/local/lib/python3.12/site-packages/ /usr/local/lib/python3.12/site-packages/
 COPY --from=builder /usr/local/bin/ /usr/local/bin/
 COPY . .
+RUN apt-get update && apt-get install -y poppler-utils
+RUN apt-get install libreoffice-impress libreoffice-core fonts-dejavu-core --no-install-recommends -y
 RUN adduser --system --group hackrx
 
 ENV HOME=/home/hackrx \
@@ -16,6 +18,10 @@ ENV HOME=/home/hackrx \
 RUN mkdir -p /home/hackrx/.cache && \
     chown -R hackrx:hackrx /home/hackrx/.cache && \
     chmod -R 755 /home/hackrx/.cache
+
+RUN mkdir -p /tmp/libreprofile && \
+    chown -R hackrx:hackrx /tmp/libreprofile && \
+    chmod -R 755 /tmp/libreprofile
 
 RUN mkdir -p /app/document_data && \
     chown -R hackrx:hackrx /app/document_data && \

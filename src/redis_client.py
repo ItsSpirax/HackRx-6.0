@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import hashlib
 from typing import List
 
 import numpy as np
@@ -11,9 +12,7 @@ from redis.commands.search.query import Query
 from redisvl.index import AsyncSearchIndex
 from redisvl.schema import IndexSchema
 
-
 load_dotenv()
-
 
 redis_host = os.getenv("REDIS_HOST")
 redis_port = int(os.getenv("REDIS_PORT"))
@@ -31,9 +30,6 @@ def get_redis_client():
         return None
 
 
-redis_client = get_redis_client()
-
-
 def normalize_vector(vec: List[float]) -> bytes:
     arr = np.array(vec, dtype=np.float32)
     norm = np.linalg.norm(arr)
@@ -42,7 +38,16 @@ def normalize_vector(vec: List[float]) -> bytes:
     return arr.tobytes()
 
 
-async def store_embeddings_in_redis(chunks: List[str], embeddings: List[List[float]]):
+def generate_embedding_cache_key(doc_hash: str, embedding: List[float]) -> str:
+    key_hash = hashlib.sha256(
+        np.array(embedding, dtype=np.float32).tobytes()
+    ).hexdigest()
+    return f"simsearch:{doc_hash}:{key_hash}"
+
+
+async def store_embeddings_in_redis(
+    doc_hash: str, chunks: List[str], embeddings: List[List[float]]
+):
     async_client = redis_async.Redis(
         host=redis_host, port=redis_port, db=redis_db, decode_responses=False
     )
@@ -58,6 +63,7 @@ async def store_embeddings_in_redis(chunks: List[str], embeddings: List[List[flo
     schema = IndexSchema(
         index={"name": "document_index", "prefix": "doc:"},
         fields=[
+            {"name": "doc_hash", "type": "tag"},
             {"name": "text", "type": "text"},
             {
                 "name": "embedding",
@@ -65,7 +71,7 @@ async def store_embeddings_in_redis(chunks: List[str], embeddings: List[List[flo
                 "attrs": {
                     "algorithm": "flat",
                     "dims": dims,
-                    "distance_metric": "COSINE",
+                    "distance_metric": "IP",
                 },
             },
         ],
@@ -77,14 +83,13 @@ async def store_embeddings_in_redis(chunks: List[str], embeddings: List[List[flo
         validate_on_load=True,
     )
 
-    if await index.exists():
-        await index.delete(drop=True)
-
-    await index.create(overwrite=True)
+    if not await index.exists():
+        await index.create(overwrite=True)
 
     documents = [
         {
-            "id": f"doc:{i}",
+            "id": f"doc:{doc_hash}:{i}",
+            "doc_hash": doc_hash,
             "text": chunk,
             "embedding": normalize_vector(emb),
         }
@@ -94,7 +99,7 @@ async def store_embeddings_in_redis(chunks: List[str], embeddings: List[List[flo
     await index.load(documents)
 
     await async_client.set(
-        "document:metadata",
+        f"document:metadata:{doc_hash}",
         json.dumps(
             {
                 "num_chunks": len(unique_chunks),
@@ -106,15 +111,22 @@ async def store_embeddings_in_redis(chunks: List[str], embeddings: List[List[flo
     await async_client.close()
 
 
-async def search_similar_documents(query_embedding: List[float], k: int = 10):
+async def search_similar_documents(
+    query_embedding: List[float], doc_hash: str, k: int = 10
+):
     async_client = redis_async.Redis(
-        host=redis_host, port=redis_port, db=redis_db, decode_responses=False
+        host=redis_host, port=redis_port, db=redis_db, decode_responses=True
     )
     await async_client.ping()
 
+    cache_key = generate_embedding_cache_key(doc_hash, query_embedding)
+    cached = await async_client.get(cache_key)
+    if cached:
+        return json.loads(cached)
+
     query_vec = normalize_vector(query_embedding)
 
-    base_query = f"*=>[KNN {k} @embedding $vec_param]"
+    base_query = f"@doc_hash:{{{doc_hash}}}=>[KNN {k} @embedding $vec_param]"
 
     q = (
         Query(base_query)
@@ -141,6 +153,8 @@ async def search_similar_documents(query_embedding: List[float], k: int = 10):
             unique_matches.append({"text": text})
         if len(unique_matches) == k:
             break
+
+    await async_client.set(cache_key, json.dumps(unique_matches), ex=3600)
 
     await async_client.close()
     return unique_matches

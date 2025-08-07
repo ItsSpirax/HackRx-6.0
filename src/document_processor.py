@@ -1,148 +1,416 @@
+import base64
+import concurrent.futures
+import csv
 import email
-import io
-import re
 import hashlib
+import io
+import os
+import re
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import List
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 
 import docx
+import fitz
+import redis
 import requests
-from PyPDF2 import PdfReader
+from dotenv import load_dotenv
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from mistralai import Mistral
+from openpyxl import load_workbook
+from pdf2image import convert_from_path
+from PIL import Image
 from transformers import AutoTokenizer
 
-llama3_tokenizer = AutoTokenizer.from_pretrained("NousResearch/Meta-Llama-3-8B")
+load_dotenv()
+
+document_data_dir = Path("document_data")
+document_data_dir.mkdir(exist_ok=True)
+
+client = redis.Redis(
+    host=os.getenv("REDIS_HOST"),
+    port=int(os.getenv("REDIS_PORT")),
+    db=int(os.getenv("REDIS_DB")),
+    decode_responses=True,
+)
+
+tokenizer = AutoTokenizer.from_pretrained(
+    os.getenv("TOKENIZER_MODEL"), use_fast=True, token=os.getenv("HF_API_KEY")
+)
 
 
 def identify_document_type(url: str) -> str:
-    path = urlparse(url).path.lower()
-    if path.endswith(".pdf") or "pdf" in url:
-        return "pdf"
-    if path.endswith(".docx") or "docx" in url:
-        return "docx"
-    if path.endswith(".eml") or "email" in url or "eml" in url:
-        return "email"
-    return "pdf"
+    extension_map = {
+        "pdf": "pdf",
+        "docx": "docx",
+        "eml": "email",
+        "msg": "email",
+        "jpg": "jpg",
+        "jpeg": "jpg",
+        "png": "png",
+        "xlsx": "excel",
+        "xls": "excel",
+        "pptx": "ppt",
+        "ppt": "ppt",
+        "csv": "csv",
+    }
+
+    def get_extension_from_url(url: str) -> str:
+        parsed_path = urlparse(url).path.lower()
+        ext = Path(parsed_path).suffix.lower().lstrip(".")
+        return extension_map.get(ext)
+
+    try:
+        head = requests.head(url, allow_redirects=True, timeout=5)
+        content_type = head.headers.get("Content-Type", "").lower()
+        content_disp = head.headers.get("Content-Disposition", "").lower()
+        parsed_path = urlparse(url).path.lower()
+
+        filename = None
+        if "filename=" in content_disp:
+            filename = unquote(content_disp.split("filename=")[-1].strip('"; '))
+        if not filename:
+            filename = os.path.basename(parsed_path)
+
+        ext = Path(filename).suffix.lower().lstrip(".")
+        if ext in extension_map:
+            return extension_map[ext]
+
+        if "pdf" in content_type:
+            return "pdf"
+        elif "word" in content_type:
+            return "docx"
+        elif "excel" in content_type or "spreadsheet" in content_type:
+            return "excel"
+        elif "powerpoint" in content_type:
+            return "ppt"
+        elif "image/jpeg" in content_type:
+            return "jpg"
+        elif "image/png" in content_type:
+            return "png"
+        elif "message/rfc822" in content_type or "eml" in content_type:
+            return "email"
+        elif "text/csv" in content_type or "application/csv" in content_type:
+            return "csv"
+
+        return None
+
+    except Exception:
+        return get_extension_from_url(url)
 
 
 def download_document(url: str) -> bytes:
-    response = requests.get(url)
-    if response.status_code != 200:
-        raise Exception(
-            f"Failed to download document. Status code: {response.status_code}"
-        )
-    return response.content
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        return response.content
+    except requests.RequestException as e:
+        raise Exception(f"Failed to download document: {e}")
 
 
-def extract_text_from_pdf(content: bytes) -> str:
-    return " ".join(
-        page.extract_text() or "" for page in PdfReader(io.BytesIO(content)).pages
+def parse_document_content(content: bytes, doc_type: str, url: str) -> str:
+    def clean_text(text: str) -> str:
+        text = re.sub(r"<.*?>", " ", text)
+        text = re.sub(r"[\n\r]+", " ", text)
+        text = re.sub(r"\s+", " ", text)
+        text = re.sub(r"(\. ?){2,}", ". ", text)
+        text = re.sub(r"!\[.*?\]\(.*?\)", "", text)
+        return text.strip()
+
+    def extract_pdf_text(content: bytes) -> str:
+        with fitz.open(stream=content, filetype="pdf") as doc:
+            texts = [clean_text(page.get_text() or "") for page in doc]
+        return " ".join(texts)
+
+    def extract_docx_text(content: bytes) -> str:
+        doc = docx.Document(io.BytesIO(content))
+        sections = []
+        current = []
+
+        for para in doc.paragraphs:
+            text = clean_text(para.text)
+            if not text:
+                continue
+
+            style = para.style.name.lower() if para.style else ""
+            if "heading" in style:
+                if current:
+                    sections.append(" ".join(current))
+                    current = []
+                current.append(f"## {text}")
+            elif "list" in style:
+                current.append(f"- {text}")
+            else:
+                current.append(text)
+
+        if current:
+            sections.append(" ".join(current))
+
+        return clean_text(" ".join(sections))
+
+    def extract_email_text(content: bytes) -> str:
+        msg = email.message_from_bytes(content)
+        parts = []
+
+        if msg.is_multipart():
+            for part in msg.walk():
+                if part.get_content_type() == "text/plain":
+                    try:
+                        text = part.get_payload(decode=True).decode("utf-8", "ignore")
+                        parts.append(clean_text(text))
+                    except Exception:
+                        continue
+        else:
+            try:
+                text = msg.get_payload(decode=True).decode("utf-8", "ignore")
+                parts.append(clean_text(text))
+            except Exception:
+                pass
+
+        return clean_text(" ".join(parts))
+
+    def extract_excel_text(content: bytes) -> str:
+        wb = load_workbook(filename=io.BytesIO(content), data_only=True)
+        texts = []
+
+        for sheet in wb.worksheets:
+            sheet_name = sheet.title
+            rows = list(sheet.iter_rows(values_only=True))
+            if not rows:
+                continue
+
+            header_row = next((r for r in rows if any(r)), None)
+            if not header_row:
+                continue
+            headers = [
+                str(cell).strip() if cell else f"Column{i+1}"
+                for i, cell in enumerate(header_row)
+            ]
+
+            for row_idx, row in enumerate(rows[1:], start=2):
+                if not any(row):
+                    continue
+
+                cells = []
+                for i, cell in enumerate(row):
+                    key = headers[i] if i < len(headers) else f"Column{i+1}"
+                    value = str(cell).strip()
+                    if value:
+                        cells.append(f"{key}: {value}")
+
+                if cells:
+                    context_row = (
+                        f"[Sheet: {sheet_name}, Row: {row_idx}] " + " | ".join(cells)
+                    )
+                    texts.append(context_row)
+
+        return clean_text(" ".join(texts))
+
+    def extract_with_mistral_ocr(content: bytes, doc_type: str, url: str = None) -> str:
+        client = Mistral(api_key=os.getenv("MISTRAL_API_KEY"))
+
+        try:
+            if doc_type in {"jpg", "jpeg", "png"}:
+                if not url:
+                    raise ValueError("Image URL required for image OCR")
+                ocr_response = client.ocr.process(
+                    model="mistral-ocr-latest",
+                    document={"type": "image_url", "image_url": url},
+                    include_image_base64=False,
+                )
+                pages = ocr_response.pages
+
+            elif doc_type in {"ppt", "pptx"}:
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    pptx_path = Path(tmpdir) / "slides.pptx"
+                    pdf_path = Path(tmpdir) / "slides.pdf"
+
+                    with open(pptx_path, "wb") as f:
+                        f.write(content)
+
+                    libreoffice_profile = Path("/tmp/libreprofile")
+                    libreoffice_profile.mkdir(parents=True, exist_ok=True)
+
+                    env = os.environ.copy()
+                    env["HOME"] = "/home/hackrx"
+
+                    subprocess.run(
+                        [
+                            "libreoffice",
+                            "--headless",
+                            f"-env:UserInstallation=file://{libreoffice_profile}",
+                            "--convert-to",
+                            "pdf",
+                            "--outdir",
+                            str(tmpdir),
+                            str(pptx_path),
+                        ],
+                        check=True,
+                        env=env,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+
+                    images = convert_from_path(str(pdf_path))
+
+                    def ocr_image(img: Image.Image) -> str:
+                        buffered = io.BytesIO()
+                        img.save(buffered, format="JPEG")
+                        base64_img = base64.b64encode(buffered.getvalue()).decode(
+                            "utf-8"
+                        )
+
+                        ocr_response = client.ocr.process(
+                            model="mistral-ocr-latest",
+                            document={
+                                "type": "image_url",
+                                "image_url": f"data:image/jpeg;base64,{base64_img}",
+                            },
+                            include_image_base64=False,
+                        )
+
+                        return " ".join(
+                            page.markdown
+                            for page in ocr_response.pages
+                            if page.markdown
+                        )
+
+                    with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=10
+                    ) as executor:
+                        results = list(executor.map(ocr_image, images))
+
+                    return clean_text(" ".join(results))
+
+            else:
+                raise ValueError(f"OCR not supported for type: {doc_type}")
+
+            combined_text = " ".join(
+                page.markdown for page in pages if getattr(page, "markdown", None)
+            )
+            return clean_text(combined_text)
+
+        except Exception as e:
+            raise ValueError(f"Failed to OCR {doc_type.upper()}: {e}")
+
+    def extract_csv_text(content: bytes) -> str:
+        text_rows = []
+        try:
+            decoded = content.decode("utf-8", errors="ignore")
+            reader = csv.reader(io.StringIO(decoded))
+            rows = list(reader)
+
+            if not rows:
+                return ""
+
+            headers = [header.strip() for header in rows[0]]
+
+            for idx, row in enumerate(rows[1:], start=2):
+                if not any(cell.strip() for cell in row):
+                    continue
+
+                cells = []
+                for i, cell in enumerate(row):
+                    key = headers[i] if i < len(headers) else f"Column{i+1}"
+                    value = cell.strip()
+                    if value:
+                        cells.append(f"{key}: {value}")
+
+                if cells:
+                    context_line = f"[CSV Row {idx}] " + " | ".join(cells)
+                    text_rows.append(context_line)
+
+        except Exception as e:
+            raise ValueError(f"Failed to parse CSV: {e}")
+
+        return clean_text(" ".join(text_rows))
+
+    try:
+        if doc_type == "pdf":
+            return extract_pdf_text(content)
+        elif doc_type == "docx":
+            return extract_docx_text(content)
+        elif doc_type == "email":
+            return extract_email_text(content)
+        elif doc_type == "excel":
+            return extract_excel_text(content)
+        elif doc_type in {"jpg", "png", "ppt", "pptx"}:
+            return extract_with_mistral_ocr(content, doc_type, url)
+        elif doc_type == "csv":
+            return extract_csv_text(content)
+        else:
+            raise ValueError(f"Unsupported document type: {doc_type}")
+    except Exception as e:
+        raise ValueError(f"Failed to parse {doc_type.upper()}: {e}")
+
+
+def chunk_sections(text: str, max_tokens: int, overlap_tokens: int) -> List[dict]:
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=max_tokens,
+        chunk_overlap=overlap_tokens,
+        length_function=lambda text: len(tokenizer.encode(text, truncation=False)),
+        separators=["\n\n", "\n", ". ", "! ", "? ", ", ", " ", ""],
+    )
+    chunks = splitter.split_text(text)
+    return [
+        {"text": chunk, "tokens": len(tokenizer.encode(chunk, truncation=False))}
+        for chunk in chunks
+    ]
+
+
+async def process_document(url: str, force_refresh: bool) -> dict:
+    doc_type = identify_document_type(url)
+    if not doc_type:
+        raise ValueError("Unsupported document type")
+
+    content = download_document(url)
+    if not content:
+        raise ValueError("Failed to retrieve document content")
+
+    doc_hash = hashlib.md5(content).hexdigest()
+    redis_key = f"doc:{doc_hash}"
+    if client.exists(redis_key) and not force_refresh:
+        cached_data = client.hgetall(redis_key)
+        if cached_data:
+            return {
+                "status": "cached",
+                "doc_hash": doc_hash,
+                "average_tokens": float(cached_data["average_tokens"]),
+                "max_tokens": int(cached_data["max_tokens"]),
+                "min_tokens": int(cached_data["min_tokens"]),
+                "no_of_chunks": int(cached_data.get("no_of_chunks", 0)),
+            }
+
+    text = parse_document_content(content, doc_type, url)
+
+    if not text:
+        raise ValueError("Failed to extract text from document")
+
+    max_tokens = int(os.getenv("DOCUMENT_CHUNK_SIZE"))
+    overlap_tokens = int(os.getenv("DOCUMENT_CHUNK_OVERLAP"))
+    chunk_infos = chunk_sections(text, max_tokens, overlap_tokens)
+    token_counts = [info["tokens"] for info in chunk_infos]
+    chunks = [info["text"] for info in chunk_infos]
+
+    client.hset(
+        redis_key,
+        mapping={
+            "doc_hash": doc_hash,
+            "average_tokens": sum(token_counts) / len(token_counts),
+            "max_tokens": max(token_counts),
+            "min_tokens": min(token_counts),
+            "no_of_chunks": len(chunks),
+        },
     )
 
-
-def extract_structured_docx(content: bytes) -> List[str]:
-    doc = docx.Document(io.BytesIO(content))
-    chunks = []
-    current_section = []
-
-    for para in doc.paragraphs:
-        text = para.text.strip()
-        if not text:
-            continue
-        if para.style.name.startswith("Heading"):
-            if current_section:
-                chunks.append("\n".join(current_section))
-                current_section = []
-            current_section.append(f"## {text}")
-        elif para.style.name.startswith("List"):
-            current_section.append(f"- {text}")
-        else:
-            current_section.append(text)
-
-    if current_section:
-        chunks.append("\n".join(current_section))
-
-    return chunks
-
-
-def extract_text_from_docx(content: bytes) -> str:
-    doc = docx.Document(io.BytesIO(content))
-    return " ".join(p.text for p in doc.paragraphs if p.text)
-
-
-def extract_text_from_email(content: bytes) -> str:
-    msg = email.message_from_bytes(content)
-    if msg.is_multipart():
-        return " ".join(
-            part.get_payload(decode=True).decode("utf-8", "ignore")
-            for part in msg.get_payload()
-            if part.get_content_type() == "text/plain"
-        )
-    return msg.get_payload(decode=True).decode("utf-8", "ignore")
-
-
-def get_sentences(text: str) -> List[str]:
-    return re.split(r"(?<=[.!?])\s+", text)
-
-
-def token_length(text: str) -> int:
-    return len(llama3_tokenizer.encode(text, add_special_tokens=False))
-
-
-def smart_chunk_sections(
-    sections: List[str], max_tokens: int, overlap_tokens: int
-) -> List[str]:
-    final_chunks = []
-    for section in sections:
-        tokens = llama3_tokenizer.encode(section, add_special_tokens=False)
-        if len(tokens) <= max_tokens:
-            final_chunks.append(section)
-        else:
-            sentences = get_sentences(section)
-            chunk = []
-            chunk_len = 0
-            for sent in sentences:
-                sent_tokens = token_length(sent)
-                if chunk_len + sent_tokens <= max_tokens:
-                    chunk.append(sent)
-                    chunk_len += sent_tokens
-                else:
-                    final_chunks.append(" ".join(chunk))
-                    chunk = [sent]
-                    chunk_len = sent_tokens
-            if chunk:
-                final_chunks.append(" ".join(chunk))
-    return final_chunks
-
-
-async def process_document(
-    url: str, chunk_size: int = 512, chunk_overlap: int = 100
-) -> List[str]:
-    doc_type = identify_document_type(url)
-
-    document_data_dir = Path("document_data")
-    document_data_dir.mkdir(exist_ok=True)
-
-    url_hash = hashlib.md5(url.encode()).hexdigest()
-    filename = f"{url_hash}.{doc_type}"
-    file_path = document_data_dir / filename
-
-    if file_path.exists():
-        with open(file_path, "rb") as f:
-            content = f.read()
-    else:
-        content = download_document(url)
-        with open(file_path, "wb") as f:
-            f.write(content)
-
-    if doc_type == "pdf":
-        text = extract_text_from_pdf(content)
-        return smart_chunk_sections([text], chunk_size, chunk_overlap)
-    elif doc_type == "docx":
-        structured_sections = extract_structured_docx(content)
-        return smart_chunk_sections(structured_sections, chunk_size, chunk_overlap)
-    elif doc_type == "email":
-        text = extract_text_from_email(content)
-        return smart_chunk_sections([text], chunk_size, chunk_overlap)
-    else:
-        raise ValueError(f"Unsupported document type: {doc_type}")
+    return {
+        "status": "processed",
+        "doc_hash": doc_hash,
+        "average_tokens": sum(token_counts) / len(token_counts),
+        "max_tokens": max(token_counts),
+        "min_tokens": min(token_counts),
+        "no_of_chunks": len(chunks),
+        "chunks": chunks,
+    }

@@ -16,6 +16,7 @@ import docx
 import fitz
 import redis
 import requests
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from mistralai import Mistral
@@ -55,6 +56,8 @@ def identify_document_type(url: str) -> str:
         "pptx": "ppt",
         "ppt": "ppt",
         "csv": "csv",
+        "htm": "html",
+        "html": "html",
     }
 
     def get_extension_from_url(url: str) -> str:
@@ -94,6 +97,8 @@ def identify_document_type(url: str) -> str:
             return "email"
         elif "text/csv" in content_type or "application/csv" in content_type:
             return "csv"
+        elif "text/html" in content_type or "application/xhtml+xml" in content_type:
+            return "html"
 
         return None
 
@@ -327,6 +332,24 @@ def parse_document_content(content: bytes, doc_type: str, url: str) -> str:
 
         return clean_text(" ".join(text_rows))
 
+    def extract_html_text(content: bytes) -> str:
+        try:
+            html = content.decode("utf-8", errors="ignore")
+            soup = BeautifulSoup(html, "lxml")
+
+            for tag in soup(["script", "style", "noscript", "template"]):
+                tag.decompose()
+
+            main = soup.find(["main", "article"]) or soup.body
+            text = (
+                main.get_text(separator=" ", strip=True)
+                if main
+                else soup.get_text(separator=" ", strip=True)
+            )
+            return clean_text(text)
+        except Exception as e:
+            raise ValueError(f"Failed to parse HTML: {e}")
+
     try:
         if doc_type == "pdf":
             return extract_pdf_text(content)
@@ -340,6 +363,8 @@ def parse_document_content(content: bytes, doc_type: str, url: str) -> str:
             return extract_with_mistral_ocr(content, doc_type, url)
         elif doc_type == "csv":
             return extract_csv_text(content)
+        elif doc_type == "html":
+            return extract_html_text(content)
         else:
             return f"No context available for {doc_type.upper()}"
     except Exception as e:

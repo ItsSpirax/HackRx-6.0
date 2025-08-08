@@ -190,7 +190,7 @@ Rules:
 """
         else:
             return f"""
-You are a helpful assistant who provides answers based on the provided context.
+You are a helpful assistant who provides answers based on the provided context. Say "I can't answer" outright if the question is completely unrelated to the context.
 
 Use citation format [CITE:<source_number>] after factual statements.
 
@@ -206,8 +206,8 @@ The following context is from the {" link" if doc_type == "html" else doc_type +
 
 Guidelines:
 - Use the context to answer as fully and helpfully as possible.
-- If the context does not contain a clear answer, explain what is missing or suggest ways the user might find the information.
-- Say "I can't answer" outright if the question is unrelated to the context or there is no steps in the context to help them find the answer.
+- If the context does not contain a clear answer, suggest ways the user might find the information.
+- Say "I can't answer" outright if there are no steps in the context to help them find the answer.
 - Be clear, concise, and respectful.
 - Do not add introductions or summaries. Do not provide information which is not present in the context.
 """

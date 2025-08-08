@@ -207,9 +207,9 @@ The following context is from the {" link" if doc_type == "html" else doc_type +
 Guidelines:
 - Use the context to answer as fully and helpfully as possible.
 - If the context does not contain a clear answer, explain what is missing or suggest ways the user might find the information.
-- Avoid saying "I can't answer" outright. Instead, be polite and constructive.
+- Say "I can't answer" outright if the question is unrelated to the context or there is no steps in the context to help them find the answer.
 - Be clear, concise, and respectful.
-- Do not add introductions or summaries.
+- Do not add introductions or summaries. Do not provide information which is not present in the context.
 """
 
     prompt = build_prompt(matched_texts)

@@ -391,6 +391,7 @@ async def process_document(url: str, force_refresh: bool) -> dict:
         return {
             "status": "processed",
             "doc_hash": "invalid_item",
+            "doc_type": "unknown",
             "average_tokens": 0,
             "max_tokens": 10,
             "min_tokens": 0,
@@ -409,6 +410,7 @@ async def process_document(url: str, force_refresh: bool) -> dict:
         return {
             "status": "processed",
             "doc_hash": "invalid_item",
+            "doc_type": doc_type,
             "average_tokens": 0,
             "max_tokens": 10,
             "min_tokens": 0,
@@ -430,6 +432,7 @@ async def process_document(url: str, force_refresh: bool) -> dict:
             return {
                 "status": "cached",
                 "doc_hash": doc_hash,
+                "doc_type": doc_type,
                 "average_tokens": float(cached_data["average_tokens"]),
                 "max_tokens": int(cached_data["max_tokens"]),
                 "min_tokens": int(cached_data["min_tokens"]),
@@ -442,6 +445,7 @@ async def process_document(url: str, force_refresh: bool) -> dict:
         return {
             "status": "processed",
             "doc_hash": doc_hash,
+            "doc_type": doc_type,
             "average_tokens": 0,
             "max_tokens": 10,
             "min_tokens": 0,
@@ -465,6 +469,7 @@ async def process_document(url: str, force_refresh: bool) -> dict:
         redis_key,
         mapping={
             "doc_hash": doc_hash,
+            "doc_type": doc_type,
             "average_tokens": sum(token_counts) / len(token_counts),
             "max_tokens": max(token_counts),
             "min_tokens": min(token_counts),
@@ -475,6 +480,7 @@ async def process_document(url: str, force_refresh: bool) -> dict:
     return {
         "status": "processed",
         "doc_hash": doc_hash,
+        "doc_type": doc_type,
         "average_tokens": sum(token_counts) / len(token_counts),
         "max_tokens": max(token_counts),
         "min_tokens": min(token_counts),

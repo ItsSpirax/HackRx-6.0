@@ -14,7 +14,6 @@ from collections import deque
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
 import google.generativeai as genai
-from google.generativeai import types
 from openai import OpenAI
 
 from src.document_processor import process_document
@@ -155,7 +154,9 @@ def sanitize_context(matched_texts: List[str]) -> List[str]:
     return sanitized_texts
 
 
-async def generate_answer_async(question: str, matched_texts: List[str]) -> str:
+async def generate_answer_async(
+    question: str, matched_texts: List[str], doc_type: str
+) -> str:
     logger.info(f"Generating answer for question: {question}")
     sanitized_context = sanitize_context(matched_texts)
     context = "\n\n".join(
@@ -165,6 +166,8 @@ async def generate_answer_async(question: str, matched_texts: List[str]) -> str:
 You are a helpful assistant who provides direct and concise answers based on the provided context.
 
 Use citation format [CITE:<source_number>] after every factual statement.
+
+The following context has been extracted from a {doc_type} document. Use it to answer the question.
 
 ---BEGIN CONTEXT---
 {context}
@@ -285,6 +288,7 @@ async def process_documents(request: Request):
             document_url, force_refresh=body.get("force_refresh", False)
         )
         doc_hash = results["doc_hash"]
+        doc_type = results.get("doc_type")
         metrics["document_chunks_count"] = results["no_of_chunks"]
         metrics["average_tokens"] = results["average_tokens"]
 
@@ -316,7 +320,7 @@ async def process_documents(request: Request):
             )
             timing_data["storing_embeddings_in_redis"] = 0
 
-        async def process_question_answer(question, q_embedding):
+        async def process_question_answer(question, q_embedding, doc_type):
             search_result = await search_similar_documents(
                 q_embedding,
                 question,
@@ -373,14 +377,14 @@ async def process_documents(request: Request):
                 passages[idx]["text"] for idx in top_indices if idx < len(passages)
             ]
 
-            answer = await generate_answer_async(question, matched_texts)
+            answer = await generate_answer_async(question, matched_texts, doc_type)
             answer = answer.replace("\n", " ").strip()
             cleaned_answer = re.sub(r" \[CITE:.*?\]", "", answer)
             return cleaned_answer
 
         answer_process_start = time.time()
         answer_tasks = [
-            process_question_answer(q, q_emb)
+            process_question_answer(q, q_emb, doc_type)
             for q, q_emb in zip(questions, question_embeddings)
         ]
         answers = await asyncio.gather(*answer_tasks)

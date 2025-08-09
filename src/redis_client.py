@@ -45,6 +45,11 @@ def generate_embedding_cache_key(doc_hash: str, embedding: List[float]) -> str:
     return f"simsearch:{doc_hash}:{key_hash}"
 
 
+def generate_qa_cache_key(doc_hash: str, question: str) -> str:
+    question_hash = hashlib.sha256(question.strip().lower().encode("utf-8")).hexdigest()
+    return f"qa_cache:{doc_hash}:{question_hash}"
+
+
 def escape_redis_query(text: str) -> str:
     specials = r'{}[]()|&!@^~":;,.<>?*$%\'\\/+-'
     return "".join(f"\\{c}" if c in specials else c for c in text)
@@ -173,3 +178,62 @@ async def search_similar_documents(
     await async_client.close()
 
     return merged_results
+
+
+async def get_cached_answer(doc_hash: str, question: str) -> str:
+    async_client = redis_async.Redis(
+        host=redis_host, port=redis_port, db=redis_db, decode_responses=True
+    )
+
+    try:
+        await async_client.ping()
+        cache_key = generate_qa_cache_key(doc_hash, question)
+
+        cached_answer = await async_client.get(cache_key)
+        return cached_answer if cached_answer else None
+    except Exception as e:
+        print(f"Error getting cached answer: {e}")
+        return None
+    finally:
+        await async_client.close()
+
+
+async def cache_answer(doc_hash: str, question: str, answer: str, ttl: int = 86400):
+    async_client = redis_async.Redis(
+        host=redis_host, port=redis_port, db=redis_db, decode_responses=True
+    )
+
+    try:
+        await async_client.ping()
+        cache_key = generate_qa_cache_key(doc_hash, question)
+
+        await async_client.set(cache_key, answer, ex=ttl)
+    except Exception as e:
+        print(f"Error caching answer: {e}")
+    finally:
+        await async_client.close()
+
+
+async def clear_qa_cache_for_document(doc_hash: str):
+    async_client = redis_async.Redis(
+        host=redis_host, port=redis_port, db=redis_db, decode_responses=True
+    )
+
+    try:
+        await async_client.ping()
+        pattern = f"qa_cache:{doc_hash}:*"
+        cursor = 0
+        deleted_count = 0
+        while True:
+            cursor, keys = await async_client.scan(
+                cursor=cursor, match=pattern, count=100
+            )
+            if keys:
+                deleted_count += await async_client.delete(*keys)
+            if cursor == 0:
+                break
+        print(f"Cleared {deleted_count} cached Q&A pairs for document {doc_hash}")
+    except Exception as e:
+        print(f"Error clearing QA cache: {e}")
+    finally:
+        await async_client.close()

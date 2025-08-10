@@ -27,9 +27,11 @@ from transformers import AutoTokenizer
 
 load_dotenv()
 
+# Create directory for storing document data
 document_data_dir = Path("document_data")
 document_data_dir.mkdir(exist_ok=True)
 
+# Initialize Redis client for caching document metadata
 client = redis.Redis(
     host=os.getenv("REDIS_HOST"),
     port=int(os.getenv("REDIS_PORT")),
@@ -37,12 +39,17 @@ client = redis.Redis(
     decode_responses=True,
 )
 
+# Load tokenizer for precise token counting during chunking
 tokenizer = AutoTokenizer.from_pretrained(
     os.getenv("TOKENIZER_MODEL"), use_fast=True, token=os.getenv("HF_API_KEY")
 )
 
 
 def identify_document_type(url: str) -> str:
+    """
+    Detect document type from URL extension and HTTP headers
+    Returns document type string for appropriate processing pipeline
+    """
     extension_map = {
         "pdf": "pdf",
         "docx": "docx",
@@ -61,26 +68,31 @@ def identify_document_type(url: str) -> str:
     }
 
     def get_extension_from_url(url: str) -> str:
+        """Extract file extension from URL path"""
         parsed_path = urlparse(url).path.lower()
         ext = Path(parsed_path).suffix.lower().lstrip(".")
         return extension_map.get(ext)
 
     try:
+        # Check HTTP headers for content type information
         head = requests.head(url, allow_redirects=True, timeout=5)
         content_type = head.headers.get("Content-Type", "").lower()
         content_disp = head.headers.get("Content-Disposition", "").lower()
         parsed_path = urlparse(url).path.lower()
 
+        # Extract filename from headers or URL
         filename = None
         if "filename=" in content_disp:
             filename = unquote(content_disp.split("filename=")[-1].strip('"; '))
         if not filename:
             filename = os.path.basename(parsed_path)
 
+        # Check file extension first
         ext = Path(filename).suffix.lower().lstrip(".")
         if ext in extension_map:
             return extension_map[ext]
 
+        # Fallback to content type detection
         if "pdf" in content_type:
             return "pdf"
         elif "word" in content_type:
@@ -107,6 +119,10 @@ def identify_document_type(url: str) -> str:
 
 
 def download_document(url: str) -> bytes:
+    """
+    Download document content from URL with proper error handling
+    Returns raw bytes for further processing
+    """
     try:
         response = requests.get(url, timeout=10)
         response.raise_for_status()
@@ -116,12 +132,18 @@ def download_document(url: str) -> bytes:
 
 
 def parse_document_content(content: bytes, doc_type: str, url: str) -> str:
+    """
+    Extract text content from various document formats
+    Uses format-specific parsers and OCR for images/presentations
+    """
+
     def clean_text(text: str) -> str:
-        text = re.sub(r"<.*?>", " ", text)
-        text = re.sub(r"[\n\r]+", " ", text)
-        text = re.sub(r"\s+", " ", text)
-        text = re.sub(r"(\. ?){2,}", ". ", text)
-        text = re.sub(r"!\[.*?\]\(.*?\)", "", text)
+        """Clean and normalize extracted text"""
+        text = re.sub(r"<.*?>", " ", text)  # Remove HTML tags
+        text = re.sub(r"[\n\r]+", " ", text)  # Normalize line breaks
+        text = re.sub(r"\s+", " ", text)  # Normalize whitespace
+        text = re.sub(r"(\. ?){2,}", ". ", text)  # Fix multiple periods
+        text = re.sub(r"!\[.*?\]\(.*?\)", "", text)  # Remove markdown images
         return text.strip()
 
     def extract_pdf_text(content: bytes) -> str:
@@ -372,6 +394,10 @@ def parse_document_content(content: bytes, doc_type: str, url: str) -> str:
 
 
 def chunk_sections(text: str, max_tokens: int, overlap_tokens: int) -> List[dict]:
+    """
+    Split text into overlapping chunks using LangChain splitter
+    Uses tokenizer for precise token counting to optimize embedding performance
+    """
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=max_tokens,
         chunk_overlap=overlap_tokens,
@@ -386,8 +412,17 @@ def chunk_sections(text: str, max_tokens: int, overlap_tokens: int) -> List[dict
 
 
 async def process_document(url: str, force_refresh: bool) -> dict:
+    """
+    Main document processing pipeline
+    1. Detect document type
+    2. Download and extract content
+    3. Chunk text into optimized segments
+    4. Cache results in Redis for future use
+    """
+    # Step 1: Identify document type from URL
     doc_type = identify_document_type(url)
     if not doc_type:
+        # Return default response for unsupported formats
         return {
             "status": "processed",
             "doc_hash": "invalid_item",
@@ -405,6 +440,7 @@ async def process_document(url: str, force_refresh: bool) -> dict:
             ],
         }
 
+    # Step 2: Download document content
     content = download_document(url)
     if not content:
         return {
@@ -424,8 +460,11 @@ async def process_document(url: str, force_refresh: bool) -> dict:
             ],
         }
 
+    # Generate unique hash for document content
     doc_hash = hashlib.md5(content).hexdigest()
     redis_key = f"doc:{doc_hash}"
+
+    # Check if document is already cached (unless force refresh)
     if client.exists(redis_key) and not force_refresh:
         cached_data = client.hgetall(redis_key)
         if cached_data:
@@ -439,6 +478,7 @@ async def process_document(url: str, force_refresh: bool) -> dict:
                 "no_of_chunks": int(cached_data.get("no_of_chunks", 0)),
             }
 
+    # Step 3: Extract text content using format-specific parser
     text = parse_document_content(content, doc_type, url)
 
     if not text:
@@ -459,12 +499,14 @@ async def process_document(url: str, force_refresh: bool) -> dict:
             ],
         }
 
+    # Step 4: Chunk text into optimal segments for embedding
     max_tokens = int(os.getenv("DOCUMENT_CHUNK_SIZE"))
     overlap_tokens = int(os.getenv("DOCUMENT_CHUNK_OVERLAP"))
     chunk_infos = chunk_sections(text, max_tokens, overlap_tokens)
     token_counts = [info["tokens"] for info in chunk_infos]
     chunks = [info["text"] for info in chunk_infos]
 
+    # Step 5: Cache document metadata in Redis
     client.hset(
         redis_key,
         mapping={

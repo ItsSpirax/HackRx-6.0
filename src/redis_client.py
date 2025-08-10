@@ -14,12 +14,14 @@ from redisvl.schema import IndexSchema
 
 load_dotenv()
 
+# Redis connection configuration
 redis_host = os.getenv("REDIS_HOST")
 redis_port = int(os.getenv("REDIS_PORT"))
 redis_db = int(os.getenv("REDIS_DB"))
 
 
 def get_redis_client():
+    """Create synchronous Redis client for basic operations"""
     try:
         client = redis.Redis(
             host=redis_host, port=redis_port, db=redis_db, decode_responses=True
@@ -31,6 +33,10 @@ def get_redis_client():
 
 
 def normalize_vector(vec: List[float]) -> bytes:
+    """
+    Normalize vector to unit length for consistent similarity calculations
+    Redis uses Inner Product distance, so normalization enables cosine similarity
+    """
     arr = np.array(vec, dtype=np.float32)
     norm = np.linalg.norm(arr)
     if norm > 0:
@@ -39,6 +45,7 @@ def normalize_vector(vec: List[float]) -> bytes:
 
 
 def generate_embedding_cache_key(doc_hash: str, embedding: List[float]) -> str:
+    """Generate unique cache key for search results based on document and query embedding"""
     key_hash = hashlib.sha256(
         np.array(embedding, dtype=np.float32).tobytes()
     ).hexdigest()
@@ -46,11 +53,13 @@ def generate_embedding_cache_key(doc_hash: str, embedding: List[float]) -> str:
 
 
 def generate_qa_cache_key(doc_hash: str, question: str) -> str:
+    """Generate unique cache key for question-answer pairs"""
     question_hash = hashlib.sha256(question.strip().lower().encode("utf-8")).hexdigest()
     return f"qa_cache:{doc_hash}:{question_hash}"
 
 
 def escape_redis_query(text: str) -> str:
+    """Escape special characters in Redis search queries to prevent syntax errors"""
     specials = r'{}[]()|&!@^~":;,.<>?*$%\'\\/+-'
     return "".join(f"\\{c}" if c in specials else c for c in text)
 
@@ -58,18 +67,25 @@ def escape_redis_query(text: str) -> str:
 async def store_embeddings_in_redis(
     doc_hash: str, chunks: List[str], embeddings: List[List[float]]
 ):
+    """
+    Store document chunks and their embeddings in Redis vector database
+    Creates search index if it doesn't exist and loads document vectors
+    """
     async_client = redis_async.Redis(
         host=redis_host, port=redis_port, db=redis_db, decode_responses=False
     )
     await async_client.ping()
 
+    # Remove duplicate chunks to avoid redundant storage
     unique_chunks = {}
     for chunk, emb in zip(chunks, embeddings):
         if chunk not in unique_chunks:
             unique_chunks[chunk] = emb
 
+    # Determine embedding dimensions for index configuration
     dims = len(next(iter(unique_chunks.values()))) if unique_chunks else 2048
 
+    # Define Redis search index schema for vector and text search
     schema = IndexSchema(
         index={"name": "document_index", "prefix": "doc:"},
         fields=[
@@ -81,12 +97,13 @@ async def store_embeddings_in_redis(
                 "attrs": {
                     "algorithm": "flat",
                     "dims": dims,
-                    "distance_metric": "IP",
+                    "distance_metric": "IP",  # Inner Product for normalized vectors
                 },
             },
         ],
     )
 
+    # Create search index using RedisVL
     index = AsyncSearchIndex(
         schema=schema,
         redis_client=async_client,
@@ -96,6 +113,7 @@ async def store_embeddings_in_redis(
     if not await index.exists():
         await index.create(overwrite=True)
 
+    # Prepare documents for insertion with normalized embeddings
     documents = [
         {
             "id": f"doc:{doc_hash}:{i}",
@@ -106,8 +124,10 @@ async def store_embeddings_in_redis(
         for i, (chunk, emb) in enumerate(unique_chunks.items())
     ]
 
+    # Load documents into the search index
     await index.load(documents)
 
+    # Store document metadata for tracking
     await async_client.set(
         f"document:metadata:{doc_hash}",
         json.dumps(
@@ -124,22 +144,29 @@ async def store_embeddings_in_redis(
 async def search_similar_documents(
     query_embedding: List[float], query_text: str, doc_hash: str, k: int = 10
 ):
+    """
+    Perform hybrid search combining vector similarity and text matching
+    Uses both KNN vector search and BM25 text search, then merges results
+    """
     async_client = redis_async.Redis(
         host=redis_host, port=redis_port, db=redis_db, decode_responses=True
     )
     await async_client.ping()
 
+    # Check for cached search results
     cache_key = generate_embedding_cache_key(doc_hash, query_embedding)
     cached = await async_client.get(cache_key)
     if cached:
         return json.loads(cached)
 
+    # Normalize query vector for consistent similarity calculation
     query_vec = normalize_vector(query_embedding)
 
     vector_matches = []
     bm25_matches = []
 
     try:
+        # Vector similarity search using KNN
         base_query = f"@doc_hash:{{{doc_hash}}}=>[KNN {k*2} @embedding $vec_param]"
         vector_query = (
             Query(base_query)
@@ -156,6 +183,7 @@ async def search_similar_documents(
         print(f"Vector search error: {e}")
 
     try:
+        # BM25 text search for keyword matching
         bm25_query_str = f'@doc_hash:{{{doc_hash}}} "{escape_redis_query(query_text)}"'
         bm25_query = (
             Query(bm25_query_str).return_fields("text").paging(0, k * 2).dialect(2)
@@ -165,6 +193,7 @@ async def search_similar_documents(
     except Exception as e:
         print(f"BM25 search error: {e}")
 
+    # Merge results from both search methods, removing duplicates
     seen = set()
     merged_results = []
     for match in vector_matches + bm25_matches:
@@ -174,6 +203,7 @@ async def search_similar_documents(
         if len(merged_results) == k:
             break
 
+    # Cache results for future queries (1 hour TTL)
     await async_client.set(cache_key, json.dumps(merged_results), ex=3600)
     await async_client.close()
 
@@ -181,6 +211,7 @@ async def search_similar_documents(
 
 
 async def get_cached_answer(doc_hash: str, question: str) -> str:
+    """Retrieve cached answer for a specific question-document pair"""
     async_client = redis_async.Redis(
         host=redis_host, port=redis_port, db=redis_db, decode_responses=True
     )
@@ -199,6 +230,7 @@ async def get_cached_answer(doc_hash: str, question: str) -> str:
 
 
 async def cache_answer(doc_hash: str, question: str, answer: str, ttl: int = 86400):
+    """Store generated answer in cache with configurable TTL (default: 24 hours)"""
     async_client = redis_async.Redis(
         host=redis_host, port=redis_port, db=redis_db, decode_responses=True
     )
@@ -215,6 +247,7 @@ async def cache_answer(doc_hash: str, question: str, answer: str, ttl: int = 864
 
 
 async def clear_qa_cache_for_document(doc_hash: str):
+    """Clear all cached Q&A pairs for a specific document when force refresh is used"""
     async_client = redis_async.Redis(
         host=redis_host, port=redis_port, db=redis_db, decode_responses=True
     )
@@ -224,6 +257,7 @@ async def clear_qa_cache_for_document(doc_hash: str):
         pattern = f"qa_cache:{doc_hash}:*"
         cursor = 0
         deleted_count = 0
+        # Use scan to safely iterate through keys matching the pattern
         while True:
             cursor, keys = await async_client.scan(
                 cursor=cursor, match=pattern, count=100

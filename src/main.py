@@ -26,8 +26,10 @@ from src.redis_client import (
     clear_qa_cache_for_document,
 )
 
+# Load environment variables from .env file
 load_dotenv()
 
+# Configure logging for debugging and monitoring
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -39,11 +41,13 @@ logger.info("Starting Longg Shott API service")
 
 invoke_url = os.getenv("RERANKING_INVOKE_URL")
 
+# Initialize NVIDIA embeddings client using OpenAI SDK
 embeddingsClient = OpenAI(
     api_key=os.getenv("NV_EMBEDDINGS_API_KEY"),
     base_url=os.getenv("EMBEDDINGS_BASE_URL"),
 )
 
+# Load multiple NVIDIA ranking API keys for rotation
 nv_ranking_keys = deque(
     [
         os.getenv(f"NV_RANKING_API_KEY_{i}")
@@ -52,6 +56,7 @@ nv_ranking_keys = deque(
     ]
 )
 
+# Load multiple Gemini API keys for rotation
 gemini_keys = deque(
     [
         key
@@ -67,6 +72,7 @@ gemini_keys = deque(
 
 
 async def run_in_executor(func):
+    """Run synchronous function in thread pool to avoid blocking async event loop"""
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, func)
 
@@ -74,6 +80,10 @@ async def run_in_executor(func):
 async def generate_embeddings_async(
     chunks: List[str], batch_size: int = int(os.getenv("EMBEDDING_BATCH_SIZE"))
 ) -> List[List[float]]:
+    """
+    Generate vector embeddings for text chunks using NVIDIA embeddings API
+    Processes in batches for efficiency and returns embeddings + batch count
+    """
     logger.info(f"Generating embeddings for {len(chunks)} chunks")
     cleaned_chunks = [c.strip() for c in chunks if c and c.strip()]
     if not cleaned_chunks:
@@ -101,6 +111,7 @@ async def generate_embeddings_async(
             logger.error(f"Error in embedding batch: {str(e)}")
             return []
 
+    # Process all batches concurrently
     tasks = [
         process_batch(cleaned_chunks[i : i + batch_size])
         for i in range(0, len(cleaned_chunks), batch_size)
@@ -113,6 +124,10 @@ async def generate_embeddings_async(
 
 
 def sanitize_context(matched_texts: List[str]) -> List[str]:
+    """
+    Clean and sanitize retrieved text passages to prevent prompt injection attacks
+    Removes potentially malicious patterns while preserving legitimate content
+    """
     forbidden_patterns = [
         r"ignore\b.*instructions",
         r"disregard\b.*rules",
@@ -143,9 +158,11 @@ def sanitize_context(matched_texts: List[str]) -> List[str]:
 
     sanitized_texts = []
     for text in matched_texts:
+        # Normalize unicode characters and whitespace
         normalized_text = unicodedata.normalize("NFKC", text)
         normalized_text = re.sub(r"\s+", " ", normalized_text)
 
+        # Replace forbidden patterns with redacted marker
         for pattern in forbidden_patterns:
             normalized_text = re.sub(
                 pattern, "[REDACTED]", normalized_text, flags=re.IGNORECASE
@@ -340,10 +357,15 @@ async def log_qa_to_file(request_body, answers=None, timing_data=None, metrics=N
 
 @app.post("/api/v1/hackrx/run")
 async def process_documents(request: Request):
+    """
+    Main API endpoint for document processing and Q&A
+    Takes document URL and questions, returns generated answers
+    """
     start_time = time.time()
     timing_data = {}
     metrics = {}
 
+    # Parse and validate request body
     try:
         body = await request.json()
     except Exception:
@@ -361,6 +383,7 @@ async def process_documents(request: Request):
     force_refresh = body.get("force_refresh", False)
 
     try:
+        # Step 1: Process document (extract, chunk, and cache if needed)
         logger.info(f"Processing document: {document_url}")
         results = await process_document(document_url, force_refresh=force_refresh)
         doc_hash = results["doc_hash"]
@@ -370,11 +393,13 @@ async def process_documents(request: Request):
 
         was_document_cached = results["status"] == "cached"
 
+        # Clear Q&A cache if force refresh is enabled
         if force_refresh:
             logger.info("Force refresh enabled, clearing QA cache for document")
             await clear_qa_cache_for_document(doc_hash)
 
         if not was_document_cached:
+            # Document is new - generate embeddings for chunks and questions
             embedding_start = time.time()
             combined_input = results["chunks"] + questions
             all_embeddings, _ = await generate_embeddings_async(combined_input)
@@ -384,6 +409,8 @@ async def process_documents(request: Request):
             timing_data["embedding_generation"] = round(
                 time.time() - embedding_start, 3
             )
+
+            # Store chunk embeddings in Redis vector database
             redis_start = time.time()
             await store_embeddings_in_redis(
                 doc_hash, results["chunks"], chunk_embeddings
@@ -395,6 +422,7 @@ async def process_documents(request: Request):
             metrics["cached_questions_count"] = 0
             metrics["new_questions_count"] = len(questions)
         else:
+            # Document was cached - check for cached Q&A pairs
             logger.info(
                 "Document was cached. Checking for cached questions and generating embeddings only for new questions."
             )
@@ -424,6 +452,7 @@ async def process_documents(request: Request):
                 metrics["cached_questions_count"] = 0
                 metrics["new_questions_count"] = len(questions)
 
+            # Generate embeddings only for new questions
             if questions_to_process:
                 embedding_start = time.time()
                 question_embeddings, _ = await generate_embeddings_async(

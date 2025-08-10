@@ -2,161 +2,179 @@
 
 ## Overview
 
-Team Longg Shott's service takes a document URL and a list of questions, extracts and chunks the document, embeds the chunks, retrieves relevant passages from Redis, re-ranks them, and generates concise answers.
+Team Longg Shott's intelligent document processing system that transforms any document into an interactive Q&A assistant. Simply provide a document URL and ask questions - our AI will analyze the content and provide accurate, contextual answers.
 
-Pipeline at a glance:
-- Detect document type and download it.
-- Extract and clean text (PDF, DOCX, Email, Excel, CSV, HTML, Images, PPT/PPTX via OCR).
-- Tokenize and chunk text (configurable size/overlap).
-- Generate embeddings for chunks and questions (NVIDIA embeddings API via OpenAI SDK).
-- Store chunk vectors in Redis Stack (RediSearch) and search (KNN + BM25 hybrid).
-- Re-rank candidates with NVIDIA Rerank API.
-- Compose answers with Google Gemini models.
+## How It Works - The Architecture
 
-## API
+Our system implements a sophisticated Retrieval-Augmented Generation (RAG) pipeline that combines multiple AI technologies:
 
+### Complete Processing Pipeline
+
+1. **Smart Document Detection**
+   - Automatically identifies document type from URL headers and extensions
+   - Supports 8+ formats: PDF, DOCX, Excel, PowerPoint, Images, HTML, CSV, Email
+
+2. **Intelligent Content Extraction**
+   - **PDFs**: Uses PyMuPDF for precise text extraction
+   - **Word Documents**: Preserves structure with python-docx
+   - **Excel/CSV**: Maintains row context and relationships
+   - **Images/PowerPoint**: Advanced OCR using Mistral AI vision models
+   - **HTML**: Smart content filtering with BeautifulSoup
+   - **Email**: Extracts meaningful content from EML/MSG files
+
+3. **Smart Text Chunking**
+   - Uses Mistral-7B-Instruct-v0.1 tokenizer for precise token counting
+   - Recursive chunking with 96 token overlap to maintain context
+   - Optimized chunk sizes of 412 tokens for embedding models
+
+4. **Vector Embeddings Generation**
+   - Powered by NVIDIA's nv-embedqa-mistral-7b-v2 model
+   - Converts text chunks and questions into high-dimensional vectors
+   - Batch processing with 50 items per batch for optimal performance
+
+5. **High-Performance Search**
+   - Redis Stack with vector database capabilities
+   - Hybrid retrieval: Combines semantic similarity (KNN) + keyword matching (BM25)
+   - Retrieves top 24 initial results for comprehensive coverage
+   - Intelligent caching system for faster repeat queries
+
+6. **Advanced Re-ranking**
+   - NVIDIA nv-rerank-qa-mistral-4b:1 model fine-tunes search results
+   - Narrows down to top 12 most relevant passages
+   - Ensures most relevant context reaches the AI model
+
+7. **Intelligent Answer Generation**
+   - Primary: Google Gemini 2.5 Flash Lite model
+   - Fallback: Google Gemini 2.0 Flash for complex queries
+   - Built-in prompt injection protection and content sanitization
+   - Temperature 0.01 for consistent, factual responses
+
+### Advanced Features
+
+- **Smart Caching**: Questions and embeddings are cached to avoid reprocessing
+- **Concurrent Processing**: Async operations for handling multiple questions simultaneously
+- **Error Resilience**: Graceful fallbacks and comprehensive error handling
+- **Security**: Input sanitization and prompt injection protection
+- **Performance Monitoring**: Detailed timing metrics and request logging
+
+## Quick Start API
+
+### Main Endpoint
+```http
 POST /api/v1/hackrx/run
-Body:
+Content-Type: application/json
+
 {
-	"documents": "<public URL to the document>",
-	"questions": ["question 1", "question 2"],
-	"force_refresh": false
+    "documents": "https://example.com/document.pdf",
+    "questions": [
+        "What is the main objective?", 
+        "List the key steps.",
+        "What are the requirements?"
+    ],
+    "force_refresh": false
 }
+```
 
-Response:
+### Response Format
+```json
 {
-	"answers": ["answer for q1", "answer for q2"]
+    "answers": [
+        "The main objective is to develop...",
+        "The key steps include: 1. Planning...",
+        "Requirements include Python 3.12..."
+    ]
 }
+```
 
-Notes:
-- documents must be a reachable URL. Content type and/or extension are used to detect format.
-- force_refresh=true reprocesses the document even if cached metadata exists in Redis.
-- Answers are concise; internal citation markers are removed before returning.
+### Key Parameters
+- **documents**: Public URL to any supported document format
+- **questions**: Array of questions to ask about the document
+- **force_refresh**: Set to true to bypass cache and reprocess document
 
-## Supported document types
+## Supported Document Formats
 
-- PDF (PyMuPDF)
-- DOCX (python-docx)
-- EML/MSG (email parsing)
-- XLSX/XLS (openpyxl)
-- CSV (csv)
-- HTML (BeautifulSoup + lxml)
-- JPG/PNG via OCR (Mistral OCR)
-- PPT/PPTX via LibreOffice -> PDF -> images -> OCR (Mistral OCR)
+| Format | Technology | Use Cases |
+|--------|------------|-----------|
+| **PDF** | PyMuPDF | Research papers, reports, manuals |
+| **DOCX** | python-docx | Contracts, proposals, documentation |
+| **Excel/CSV** | openpyxl, pandas | Data analysis, financial reports |
+| **PowerPoint** | LibreOffice + OCR | Presentations, slides |
+| **Images (JPG/PNG)** | Mistral OCR | Screenshots, scanned documents |
+| **HTML** | BeautifulSoup | Web pages, online articles |
+| **Email (EML/MSG)** | email library | Email threads, communications |
 
-## Configuration (.env)
+### Architecture Components
 
-Copy .env.example to .env and fill values. Key variables used in code:
+**Core Technologies:**
+- FastAPI: High-performance async web framework
+- Redis Stack: Vector database with search capabilities
+- NVIDIA AI APIs: Embeddings and re-ranking models
+- Google Gemini: Natural language generation
+- Mistral AI: OCR for images and presentations
 
-- Redis
-	- REDIS_HOST (default in compose: redis)
-	- REDIS_PORT (default: 6379)
-	- REDIS_DB (default: 0)
+**Processing Pipeline:**
+1. Document type detection and download
+2. Content extraction with format-specific parsers
+3. Text chunking with context preservation
+4. Vector embedding generation (NVIDIA)
+5. Storage in Redis vector database
+6. Hybrid search (semantic + keyword)
+7. Result re-ranking (NVIDIA)
+8. Answer generation (Google Gemini)
 
-- Tokenization / chunking
-	- TOKENIZER_MODEL (Hugging Face model id)
-	- HF_API_KEY (required to download tokenizer if gated)
-	- DOCUMENT_CHUNK_SIZE (int, tokens)
-	- DOCUMENT_CHUNK_OVERLAP (int, tokens)
+**Data Flow:**
+```
+Document URL → Content Extraction → Text Chunking → Vector Embeddings → 
+Redis Storage → Question Processing → Hybrid Search → Re-ranking → 
+Answer Generation → Response Caching → Final Response
+```
 
-- Embeddings (NVIDIA via OpenAI SDK)
-	- NV_EMBEDDINGS_API_KEY
-	- EMBEDDINGS_BASE_URL (e.g., https://integrate.api.nvidia.com/v1)
-	- EMBEDDING_MODEL (e.g., nvidia/nv-embedqa-mistral-7b-v2)
-	- EMBEDDING_BATCH_SIZE (int)
+## Technical Implementation Details
 
-- Re-ranking (NVIDIA)
-	- RERANKING_INVOKE_URL (e.g., https://ai.api.nvidia.com/v1/retrieval/nvidia/reranking)
-	- RERANKING_MODEL (e.g., nv-rerank-qa-mistral-4b:1)
-	- NV_RANKING_API_KEY_0, NV_RANKING_API_KEY_1, NV_RANKING_API_KEY_2, NV_RANKING_API_KEY_3 (one or more; rotated per request)
+### Document Processing (src/document_processor.py)
+- **identify_document_type()**: Uses HTTP headers and URL extensions to detect document format
+- **download_document()**: Fetches documents with proper error handling and timeouts
+- **parse_document_content()**: Format-specific extraction with OCR support for images/presentations
+- **chunk_sections()**: Uses LangChain's RecursiveCharacterTextSplitter with Mistral tokenizer
 
-- Completion (Google Gemini)
-	- COMPLETION_MODEL (e.g., gemini-2.5-flash-lite)
-	- GEMINI_COMPLETION_API_KEY and/or GEMINI_COMPLETION_API_KEY_1/_2/_3 (set at least one; code rotates among those exact names)
-	- Optional alternate model if the strict prompt refuses:
-		- ALT_COMPLETION_MODEL
-		- ALT_MAX_OUTPUT_TOKENS, ALT_TEMPERATURE, ALT_TOP_P, ALT_TOP_K
+### Vector Search & Caching (src/redis_client.py)
+- **Redis Stack Integration**: Vector database with RedisVL for efficient similarity search
+- **Hybrid Search**: Combines vector similarity (IP distance) with BM25 text matching
+- **Smart Caching**: Embeddings and Q&A pairs cached with configurable TTL
+- **Normalized Vectors**: Unit-length normalization for consistent similarity scoring
 
-- Generation controls
-	- MAX_OUTPUT_TOKENS, TEMPERATURE, TOP_P, TOP_K
-	- SEARCH_RESULTS_COUNT (initial retrieve count)
-	- TOP_RESULTS_COUNT (top passages after re-ranking)
+### API Orchestration (src/main.py)
+- **FastAPI Framework**: Async request handling with comprehensive error management
+- **Multi-Model Pipeline**: Coordinates embeddings, search, re-ranking, and generation
+- **Performance Monitoring**: Request logging with detailed timing and metrics
+- **Security**: Input sanitization and prompt injection protection
 
-- OCR (Images/PPT/PPTX)
-	- MISTRAL_API_KEY
-
-Tip: In .env, do not wrap values in quotes. Use KEY=value, not KEY="value".
+### Key Optimizations
+- **Batch Processing**: Embeddings generated in configurable batches (50 items)
+- **Connection Pooling**: Efficient Redis and API client management
+- **Async Operations**: Non-blocking I/O for concurrent question processing
+- **Intelligent Fallbacks**: Alternative models when primary responses are restricted
 
 ## Run with Docker Compose
 
 Prerequisites:
 - Docker and Docker Compose
 
-Steps (PowerShell):
-```powershell
-Copy-Item .env.example .env -Force
+Steps (Bash):
+```bash
+cp .env.example .env
 # Edit .env to add your API keys
 docker compose up --build -d
 ```
 
-The API will be on http://localhost:8000
+The API will be available at http://localhost:8000
 
-Quick test:
-```powershell
-Invoke-RestMethod `
-	-Uri http://localhost:8000/api/v1/hackrx/run `
-	-Method POST `
-	-ContentType 'application/json' `
-	-Body (@{
-		documents = 'https://example.com/sample.pdf'
-		questions = @('What is the main objective?', 'List the key steps.')
-		force_refresh = $false
-	} | ConvertTo-Json)
-```
+### Performance Metrics
 
-## Local development (without Docker)
-
-Prerequisites:
-- Python 3.12
-- Redis Stack running locally (docker run -p 6379:6379 redis/redis-stack-server:latest)
- - For PPT/PPTX OCR and image-to-PDF: install LibreOffice and Poppler (Windows builds available online)
-
-Setup and run:
-```powershell
-python -m venv .venv
-./.venv/Scripts/Activate.ps1
-pip install -r requirements.txt
-$env:REDIS_HOST = 'localhost'
-uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-## How it works
-
-- Document processing (src/document_processor.py)
-	- identify_document_type() uses headers/URL to infer type.
-	- download_document() fetches the file.
-	- parse_document_content() extracts text per type (including OCR via Mistral for images/PPT/PPTX).
-	- chunk_sections() splits text using Hugging Face tokenizer + LangChain splitter.
-	- Redis stores per-document metadata; chunk texts are embedded and indexed.
-
-- Embeddings & search (src/redis_client.py)
-	- Vectors normalized to unit length; stored with RedisVL index (IP distance).
-	- Hybrid retrieval: vector KNN + BM25 on text; results merged and cached per-query.
-
-- Orchestration (src/main.py)
-	- POST /api/v1/hackrx/run accepts the URL and questions.
-	- Embeds chunks (if not cached) and questions.
-	- Retrieves and re-ranks passages, builds a guarded prompt, and calls Gemini.
-	- Writes a structured entry to requests.log with timing/metrics.
-
-## Troubleshooting
-
-- 401/403 from NVIDIA or Google: verify API keys in .env and that models are enabled for your account.
-- Redis index missing: the service creates it automatically; ensure you are running Redis Stack (not vanilla redis).
-- OCR for PPT/PPTX fails in Docker: container installs LibreOffice and poppler-utils; ensure the URL is reachable and documents are not password-protected.
-- Tokenizer download issues: set HF_API_KEY and ensure outbound network is allowed.
-- Large documents: tune DOCUMENT_CHUNK_SIZE and DOCUMENT_CHUNK_OVERLAP; EMBEDDING_BATCH_SIZE controls throughput.
-
-## Notes
-
-- The compose file mounts only the .env. Redis data is persisted via the redis_data volume.
+The system logs detailed performance data to `requests.log`:
+- Document processing time
+- Embedding generation time  
+- Redis storage/retrieval time
+- Answer generation time
+- Cache hit/miss ratios
+- Question processing metrics

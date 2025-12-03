@@ -1,0 +1,105 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+.halloween-cobweb {
+  position: absolute;
+  width: 220px;
+  height: 220px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 200'%3E%3Cg stroke='%23f97316' stroke-width='1.6' fill='none' stroke-linecap='round' opacity='0.5'%3E%3Cpath d='M0 0 L200 0 L200 200'/%3E%3Cpath d='M0 0 L150 50'/%3E%3Cpath d='M0 0 L110 110'/%3E%3Cpath d='M0 0 L60 160'/%3E%3Cpath d='M0 40 L160 40' opacity='0.35'/%3E%3Cpath d='M0 80 L180 80' opacity='0.25'/%3E%3Cpath d='M0 120 L190 120' opacity='0.18'/%3E%3Cpath d='M40 0 L40 160' opacity='0.35'/%3E%3Cpath d='M80 0 L80 180' opacity='0.25'/%3E%3Cpath d='M120 0 L120 190' opacity='0.18'/%3E%3C/g%3E%3C/svg%3E");
+  background-size: cover;
+  background-repeat: no-repeat;
+  opacity: 0.3;
+  filter: drop-shadow(0 0 18px rgba(249, 115, 22, 0.2));
+}
+
+.cobweb-top-left {
+  top: -40px;
+  left: -20px;
+  transform: rotate(4deg);
+}
+
+.cobweb-top-right {
+  top: -50px;
+  right: -30px;
+  transform: scaleX(-1) rotate(6deg);
+}
+
+.halloween-candle {
+  position: absolute;
+  bottom: 30px;
+  width: 140px;
+  height: 220px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.halloween-candle::before {
+  content: "";
+  position: relative;
+  display: block;
+  width: 42px;
+  height: 130px;
+  border-radius: 14px 14px 10px 10px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.15), rgba(255, 147, 23, 0.85));
+  box-shadow: 0 0 24px rgba(255, 153, 0, 0.45), 0 12px 24px rgba(0, 0, 0, 0.35);
+}
+
+.halloween-candle::after {
+  content: "";
+  position: absolute;
+  top: 28px;
+  width: 22px;
+  height: 42px;
+  border-radius: 50% 50% 45% 45%;
+  background: radial-gradient(circle at 50% 30%, rgba(255, 234, 138, 0.95), rgba(255, 120, 23, 0.4) 60%, rgba(255, 120, 23, 0));
+  animation: candle-flicker 3.2s ease-in-out infinite;
+}
+
+.candle-left {
+  left: 5%;
+}
+
+.candle-right {
+  right: 6%;
+}
+
+@keyframes candle-flicker {
+  0%, 100% {
+    transform: translateY(-2px) scale(1);
+    opacity: 0.85;
+  }
+  40% {
+    transform: translateY(0) scale(1.08);
+    opacity: 1;
+  }
+  70% {
+    transform: translateY(-1px) scale(0.96);
+    opacity: 0.8;
+  }
+}

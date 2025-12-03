@@ -210,8 +210,8 @@ async def search_similar_documents(
     return merged_results
 
 
-async def get_cached_answer(doc_hash: str, question: str) -> str:
-    """Retrieve cached answer for a specific question-document pair"""
+async def get_cached_answer(doc_hash: str, question: str):
+    """Retrieve cached answer payload for a specific question-document pair"""
     async_client = redis_async.Redis(
         host=redis_host, port=redis_port, db=redis_db, decode_responses=True
     )
@@ -221,7 +221,14 @@ async def get_cached_answer(doc_hash: str, question: str) -> str:
         cache_key = generate_qa_cache_key(doc_hash, question)
 
         cached_answer = await async_client.get(cache_key)
-        return cached_answer if cached_answer else None
+        if not cached_answer:
+            return None
+
+        try:
+            return json.loads(cached_answer)
+        except json.JSONDecodeError:
+            # Backwards compatibility for plain-text cached answers
+            return {"text": cached_answer, "citations": []}
     except Exception as e:
         print(f"Error getting cached answer: {e}")
         return None
@@ -229,8 +236,10 @@ async def get_cached_answer(doc_hash: str, question: str) -> str:
         await async_client.close()
 
 
-async def cache_answer(doc_hash: str, question: str, answer: str, ttl: int = 86400):
-    """Store generated answer in cache with configurable TTL (default: 24 hours)"""
+async def cache_answer(
+    doc_hash: str, question: str, answer_payload: dict, ttl: int = 86400
+):
+    """Store generated answer payload in cache with configurable TTL (default: 24 hours)"""
     async_client = redis_async.Redis(
         host=redis_host, port=redis_port, db=redis_db, decode_responses=True
     )
@@ -239,7 +248,7 @@ async def cache_answer(doc_hash: str, question: str, answer: str, ttl: int = 864
         await async_client.ping()
         cache_key = generate_qa_cache_key(doc_hash, question)
 
-        await async_client.set(cache_key, answer, ex=ttl)
+        await async_client.set(cache_key, json.dumps(answer_payload), ex=ttl)
     except Exception as e:
         print(f"Error caching answer: {e}")
     finally:

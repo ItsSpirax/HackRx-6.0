@@ -47,7 +47,7 @@ tokenizer = AutoTokenizer.from_pretrained(
 
 def identify_document_type(url: str) -> str:
     """
-    Detect document type from URL extension and HTTP headers
+    Detect document type from URL extension, HTTP headers, or local file path
     Returns document type string for appropriate processing pipeline
     """
     extension_map = {
@@ -72,6 +72,14 @@ def identify_document_type(url: str) -> str:
         parsed_path = urlparse(url).path.lower()
         ext = Path(parsed_path).suffix.lower().lstrip(".")
         return extension_map.get(ext)
+
+    # Check if this is a local file path
+    if url.startswith("/api/uploads/") or os.path.isfile(url):
+        # Extract extension from local file path
+        ext = Path(url).suffix.lower().lstrip(".")
+        if ext in extension_map:
+            return extension_map[ext]
+        return None
 
     try:
         # Check HTTP headers for content type information
@@ -120,15 +128,86 @@ def identify_document_type(url: str) -> str:
 
 def download_document(url: str) -> bytes:
     """
-    Download document content from URL with proper error handling
+    Download document content from URL or read from local filesystem
     Returns raw bytes for further processing
     """
-    try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        return response.content
-    except requests.RequestException as e:
-        raise Exception(f"Failed to download document: {e}")
+    # Handle local file paths (uploaded documents)
+    if url.startswith("/api/uploads/"):
+        # Extract the filename from the URL path
+        filename = url.replace("/api/uploads/", "")
+        local_path = os.path.join(os.getcwd(), "uploaded_documents", filename)
+
+        if os.path.isfile(local_path):
+            try:
+                with open(local_path, "rb") as f:
+                    return f.read()
+            except Exception as e:
+                raise Exception(f"Failed to read local document: {e}")
+        else:
+            raise Exception(f"Local document not found: {local_path}")
+
+    if os.path.isfile(url):
+        try:
+            with open(url, "rb") as f:
+                return f.read()
+        except Exception as e:
+            raise Exception(f"Failed to read local document: {e}")
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Cache-Control": "max-age=0",
+    }
+
+    max_retries = 3
+    timeout = 30
+
+    for attempt in range(max_retries):
+        try:
+            session = requests.Session()
+            session.headers.update(headers)
+
+            response = session.get(
+                url, timeout=timeout, allow_redirects=True, verify=True
+            )
+            response.raise_for_status()
+            return response.content
+
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 403:
+                if attempt < max_retries - 1:
+                    headers["Referer"] = "/".join(url.split("/")[:3])
+                    continue
+                else:
+                    raise Exception(
+                        f"Failed to download document (403 Forbidden): {url}. The website may be blocking automated requests."
+                    )
+            else:
+                raise Exception(
+                    f"Failed to download document (HTTP {e.response.status_code}): {e}"
+                )
+
+        except requests.exceptions.Timeout:
+            if attempt < max_retries - 1:
+                timeout += 10
+                continue
+            else:
+                raise Exception(
+                    f"Failed to download document: Request timed out after {timeout}s"
+                )
+
+        except requests.RequestException as e:
+            if attempt < max_retries - 1:
+                continue
+            else:
+                raise Exception(f"Failed to download document: {e}")
 
 
 def parse_document_content(content: bytes, doc_type: str, url: str) -> str:
@@ -242,9 +321,23 @@ def parse_document_content(content: bytes, doc_type: str, url: str) -> str:
             if doc_type in {"jpg", "jpeg", "png"}:
                 if not url:
                     raise ValueError("Image URL required for image OCR")
+                
+                # Convert local API path to full URL if needed
+                if url.startswith("/api/uploads/"):
+                    base_url = os.getenv("UPLOADS_BASE_URL", "https://adithvm.centralindia.cloudapp.azure.com")
+                    image_url = f"{base_url}{url}"
+                elif not url.startswith("http"):
+                    # For local file paths, convert to base64
+                    base64_img = base64.b64encode(content).decode("utf-8")
+                    # Detect image format from content
+                    image_format = "jpeg" if doc_type in {"jpg", "jpeg"} else doc_type
+                    image_url = f"data:image/{image_format};base64,{base64_img}"
+                else:
+                    image_url = url
+                
                 ocr_response = client.ocr.process(
                     model="mistral-ocr-latest",
-                    document={"type": "image_url", "image_url": url},
+                    document={"type": "image_url", "image_url": image_url},
                     include_image_base64=False,
                 )
                 pages = ocr_response.pages
@@ -261,7 +354,7 @@ def parse_document_content(content: bytes, doc_type: str, url: str) -> str:
                     libreoffice_profile.mkdir(parents=True, exist_ok=True)
 
                     env = os.environ.copy()
-                    env["HOME"] = "/home/hackrx"
+                    env["HOME"] = "/home/deepintel"
 
                     subprocess.run(
                         [
@@ -362,15 +455,29 @@ def parse_document_content(content: bytes, doc_type: str, url: str) -> str:
             for tag in soup(["script", "style", "noscript", "template"]):
                 tag.decompose()
 
-            main = soup.find(["main", "article"]) or soup.body
-            text = (
-                main.get_text(separator=" ", strip=True)
-                if main
-                else soup.get_text(separator=" ", strip=True)
-            )
+            main = soup.find(["main", "article"]) or soup.body or soup
+            
+            # Extract text with proper separator handling
+            if main:
+                text = main.get_text(separator=" ", strip=True)
+            else:
+                text = soup.get_text(separator=" ", strip=True)
+            
+            # Additional cleanup for HTML-specific artifacts
+            text = re.sub(r'\s+', ' ', text)  # Normalize whitespace
+            text = re.sub(r'[\r\n\t]+', ' ', text)  # Remove line breaks and tabs
+            
             return clean_text(text)
         except Exception as e:
-            raise ValueError(f"Failed to parse HTML: {e}")
+            # Fallback: try extracting text without separator
+            try:
+                soup = BeautifulSoup(content.decode("utf-8", errors="ignore"), "lxml")
+                for tag in soup(["script", "style", "noscript", "template"]):
+                    tag.decompose()
+                text = soup.get_text()
+                return clean_text(text)
+            except Exception:
+                raise ValueError(f"Failed to parse HTML: {e}")
 
     try:
         if doc_type == "pdf":

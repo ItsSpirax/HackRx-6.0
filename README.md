@@ -1,4 +1,4 @@
-# HackRX-6.0: Document-Powered AI Assistant
+# HackRX-6.0: Document-Powered AI Assistant (DeepIntel - Modified Frontend Version)
 
 ## Overview
 
@@ -7,6 +7,9 @@ Team Longg Shott's intelligent document processing system that transforms any do
 ## How It Works - The Architecture
 
 Our system implements a sophisticated Retrieval-Augmented Generation (RAG) pipeline that combines multiple AI technologies:
+
+# Demo
+![Demo](demo.png)
 
 ### Complete Processing Pipeline
 

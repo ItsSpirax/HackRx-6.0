@@ -1,10 +1,10 @@
-name: hackrx-6.0
+name: cdap
 
 services:
   python:
-    build: ./
+    build: ./Backend
     ports:
-      - "8000:8000"
+      - "8005:8000"
     restart: unless-stopped
     volumes:
       - ./.env:/app/.env
